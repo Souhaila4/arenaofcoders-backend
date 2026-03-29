@@ -1,0 +1,252 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  COMPANY
+}
+
+enum Specialty {
+  FRONTEND
+  BACKEND
+  FULLSTACK
+  MOBILE
+  DATA
+  BI
+  CYBERSECURITY
+  DESIGN
+  DEVOPS
+}
+
+enum CompetitionStatus {
+  SCHEDULED
+  OPEN_FOR_ENTRY
+  RUNNING
+  SUBMISSION_CLOSED
+  EVALUATING
+  COMPLETED
+  ARCHIVED
+}
+
+enum CompetitionDifficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum ParticipantStatus {
+  JOINED
+  SUBMITTED
+  DISQUALIFIED
+}
+
+model User {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  
+  // ───── Authentication ─────
+  email           String   @unique
+  passwordHash    String
+  isEmailVerified Boolean  @default(false)
+
+  role            UserRole @default(USER)
+
+  // ───── Basic Identity ─────
+  firstName       String
+  lastName        String
+  avatarUrl       String?
+
+  // ───── CV & AI Classification ─────
+  cvUrl           String?         // Stored CV file
+  mainSpecialty   Specialty?      // Result of AI classification
+  skillTags       String[]        // ["nestjs", "react", "flutter"]
+
+  // ───── Profils externes (enrichissement compétences via Apify) ─────
+  githubUrl       String?         // Lien profil GitHub
+  linkedinUrl     String?         // Lien profil LinkedIn (scraping Apify pour skills)
+  linkedinPosts   Json?           // 3 derniers posts LinkedIn (scraped via Apify)
+  githubRepos     Json?           // 3 derniers repos GitHub avec README (scraped via Apify)
+  socialDataLastUpdate DateTime?  // Dernière mise à jour des données sociales
+
+  // ───── Trust & Performance ─────
+
+  totalChallenges Int     @default(0)
+  totalWins       Int     @default(0)
+
+  // ───── Wallet ─────
+  walletBalance   Float   @default(0)
+
+  // ───── Hedera Wallet ─────
+  hederaAccountId String?  // e.g. "0.0.123456"
+
+  // ───── Status ─────
+  isBanned        Boolean @default(false)
+  bannedReason    String?
+
+  // ───── Relations ─────
+  //rooms           RoomParticipant[]
+  //submissions     Submission[]
+  //rewards         Reward[]
+  
+  //companyProfile  Company?         @relation(fields: [companyId], references: [id])
+  //companyId       String?
+
+  competitions         Competition[]            @relation("CompetitionCreator")
+  competitionEntries   CompetitionParticipant[]
+  notifications        Notification[]
+  certificates         Certificate[]
+
+  // ───── Metadata ─────
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([role])
+  @@index([mainSpecialty])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// COMPETITION (HACKATHON)
+// ─────────────────────────────────────────────────────────────────
+
+model Competition {
+  id              String                @id @default(auto()) @map("_id") @db.ObjectId
+
+  // ───── Core Fields ─────
+  title           String
+  description     String
+  difficulty      CompetitionDifficulty
+  specialty       Specialty?
+  startDate       DateTime
+  endDate         DateTime
+
+  // ───── Lifecycle ─────
+  status          CompetitionStatus     @default(SCHEDULED)
+
+  // ───── Configuration ─────
+  rewardPool      Float                 @default(0)
+  maxParticipants Int?
+  isActive        Boolean               @default(true)
+
+  // ───── Relations ─────
+  createdBy       String                @db.ObjectId
+  creator         User                  @relation("CompetitionCreator", fields: [createdBy], references: [id])
+  participants    CompetitionParticipant[]
+  notifications   Notification[]
+
+  // ───── Metadata ─────
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([status])
+  @@index([difficulty])
+  @@index([specialty])
+  @@index([isActive])
+  @@index([startDate])
+  @@index([endDate])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// COMPETITION PARTICIPANT
+// ─────────────────────────────────────────────────────────────────
+
+model CompetitionParticipant {
+  id            String            @id @default(auto()) @map("_id") @db.ObjectId
+
+  competitionId String            @db.ObjectId
+  userId        String            @db.ObjectId
+
+  competition   Competition       @relation(fields: [competitionId], references: [id])
+  user          User              @relation(fields: [userId], references: [id])
+
+  status        ParticipantStatus @default(JOINED)
+  joinedAt      DateTime          @default(now())
+
+  @@unique([competitionId, userId])
+  @@index([competitionId])
+  @@index([userId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// NOTIFICATION
+// ─────────────────────────────────────────────────────────────────
+
+model Notification {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  userId        String   @db.ObjectId
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type          String   // e.g. "HACKATHON_MATCH"
+  title         String
+  body          String?
+
+  competitionId String?  @db.ObjectId
+  competition   Competition? @relation(fields: [competitionId], references: [id], onDelete: SetNull)
+
+  read          Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([read])
+  @@index([createdAt])
+}
+
+model EmailVerification {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  email     String
+  code      String   // 6-digit verification code
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([code])
+}
+
+model PasswordReset {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  email     String
+  code      String   // 6-digit reset code
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([code])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CERTIFICATE (NFT)
+// ─────────────────────────────────────────────────────────────────
+
+model Certificate {
+  id                   String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  userId               String   @db.ObjectId
+  user                 User     @relation(fields: [userId], references: [id])
+
+  hackathonName        String
+  tokenId              String   // Hedera token ID e.g. "0.0.123456"
+  serial               Int
+  imageIpfsUrl         String
+  metadataUrl          String
+
+  transferredToWallet  Boolean  @default(false)
+  recipientAccountId   String?  // Hedera account that received the NFT
+
+  mintedAt             DateTime @default(now())
+
+  @@index([userId])
+  @@index([tokenId])
+}
