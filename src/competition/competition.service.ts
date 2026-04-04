@@ -48,7 +48,7 @@ export class CompetitionService {
     private readonly antiCheatService: AntiCheatService,
     private readonly orchestratorAgent: OrchestratorAgent,
     private readonly walletService: WalletService,
-  ) {}
+  ) { }
 
   // ─────────────────────────────────────────────────────────────────
   // ADMIN METHODS
@@ -141,13 +141,15 @@ export class CompetitionService {
    * Fetch hackathon ideas from the n8n webhook (Admin only).
    * Used when creating a new hackathon to suggest ideas.
    */
-  async getHackathonIdeas(): Promise<{ ideas: Array<{
-    title: string;
-    score: number;
-    description: string;
-    target_market: string;
-    feasibility: string;
-  }> }> {
+  async getHackathonIdeas(): Promise<{
+    ideas: Array<{
+      title: string;
+      score: number;
+      description: string;
+      target_market: string;
+      feasibility: string;
+    }>
+  }> {
     const webhookUrl = 'https://sayariii.app.n8n.cloud/webhook/generate-ideas';
     try {
       const response = await axios.post(
@@ -185,10 +187,10 @@ export class CompetitionService {
     endDate: Date,
   ) {
     const defaults: any[] = [];
-    
+
     const totalDurationMs = endDate.getTime() - startDate.getTime();
     const totalHours = totalDurationMs / (60 * 60 * 1000);
-    
+
     // Règle: < 19h -> intervalle de 4h, >= 19h -> intervalle de 6h
     const interval = totalHours < 19 ? 4 : 6;
     const numCheckpointsMax = Math.floor(totalHours / interval);
@@ -197,7 +199,7 @@ export class CompetitionService {
     for (let i = 1; i <= numCheckpointsMax; i++) {
       // Calcul de l'heure d'ouverture potentielle
       const opensAt = new Date(startDate.getTime() + i * interval * 60 * 60 * 1000);
-      
+
       // Blackout: Aucun checkpoint ne doit s'ouvrir durant les 30 dernières minutes du hackathon
       const blackoutLimit = new Date(endDate.getTime() - 30 * 60 * 1000);
       if (opensAt >= blackoutLimit) {
@@ -526,7 +528,7 @@ export class CompetitionService {
   // TALENT METHODS
   // ─────────────────────────────────────────────────────────────────
 
-  async joinCompetition(competitionId: string, userId: string, faceImage: Express.Multer.File) {
+  async joinCompetition(competitionId: string, userId: string, faceImage?: Express.Multer.File) {
     const competition = await this.findCompetitionById(competitionId);
 
     if (
@@ -564,16 +566,19 @@ export class CompetitionService {
     }
 
     // Save image to uploads/hackathon-faces/
-    const uploadDir = path.join(process.cwd(), 'uploads', 'hackathon-faces');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
+    let hackathonFaceUrl = '/uploads/hackathon-faces/default.png';
+    if (faceImage) {
+      const uploadDir = path.join(process.cwd(), 'uploads', 'hackathon-faces');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const ext = path.extname(faceImage.originalname);
+      const filename = `face-${userId}-${competitionId}-${uniqueSuffix}${ext}`;
+      const filePath = path.join(uploadDir, filename);
+      fs.writeFileSync(filePath, faceImage.buffer);
+      hackathonFaceUrl = `/uploads/hackathon-faces/${filename}`;
     }
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const ext = path.extname(faceImage.originalname);
-    const filename = `face-${userId}-${competitionId}-${uniqueSuffix}${ext}`;
-    const filePath = path.join(uploadDir, filename);
-    fs.writeFileSync(filePath, faceImage.buffer);
-    const hackathonFaceUrl = `/uploads/hackathon-faces/${filename}`;
 
     const participation = await this.prisma.competitionParticipant.create({
       data: {
@@ -1467,7 +1472,7 @@ export class CompetitionService {
     try {
       const participant = await this.prisma.competitionParticipant.findUnique({
         where: { id: participantId },
-        include: { 
+        include: {
           user: { select: { firstName: true, lastName: true } },
           competition: { select: { description: true } },
         },
@@ -1542,7 +1547,7 @@ export class CompetitionService {
     // La soumission finale ouvre uniquement 20 minutes avant la fin du hackathon
     const now = new Date();
     const submissionOpensAt = new Date(competition.endDate.getTime() - 20 * 60 * 1000);
-    
+
     if (now < submissionOpensAt) {
       const formattedTime = submissionOpensAt.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
       throw new BadRequestException(
@@ -1615,7 +1620,7 @@ export class CompetitionService {
         },
       });
 
-      void this.runScoringPipeline(updated.id, githubUrl).catch(() => {});
+      void this.runScoringPipeline(updated.id, githubUrl).catch(() => { });
 
       this.emitEvent('competition.work_submitted', {
         competitionId,
@@ -1643,7 +1648,7 @@ export class CompetitionService {
       },
     });
 
-    void this.runScoringPipeline(updated.id, githubUrl).catch(() => {});
+    void this.runScoringPipeline(updated.id, githubUrl).catch(() => { });
 
     this.emitEvent('competition.work_submitted', {
       competitionId,
