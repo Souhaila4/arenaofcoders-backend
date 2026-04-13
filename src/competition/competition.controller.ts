@@ -291,6 +291,28 @@ export class CompetitionController {
     return this.competitionService.getTopParticipants(competitionId, limitNum);
   }
 
+  @Post(':id/pre-selection/notify')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.COMPANY)
+  @ApiOperation({
+    summary: 'Notify pre-selected participants',
+    description:
+      'Iterates over the top N pre-selected participants and queues background jobs to send them a congratulatory email.',
+  })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the competition' })
+  @ApiResponse({
+    status: 200,
+    description: 'Notifications successfully queued',
+  })
+  @ApiResponse({ status: 404, description: 'Competition not found' })
+  @ApiResponse({ status: 403, description: 'Not authorized' })
+  async notifyPreSelectedParticipants(
+    @Param('id') competitionId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.competitionService.notifyPreSelectedParticipants(competitionId, userId);
+  }
+
   @Get(':id/participants/all')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.COMPANY)

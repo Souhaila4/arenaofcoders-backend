@@ -224,6 +224,7 @@ model CompetitionParticipant {
   scoringReport  Json?    // Full AI report with reasoning, highlights, warnings
   submittedAt    DateTime?
   isWinner       Boolean  @default(false)
+  preSelectionNotified Boolean @default(false)
 
   checkpointSubmissions CheckpointSubmission[]
 

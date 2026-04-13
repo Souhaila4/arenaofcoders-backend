@@ -92,4 +92,36 @@ export class EmailService {
       console.error('Failed to send hackathon notification email:', error);
     }
   }
+
+  async sendPreSelectionNotification(
+    email: string,
+    firstName: string,
+    competitionTitle: string,
+  ): Promise<void> {
+    const mailOptions = {
+      from: 'arenaofcoders@gmail.com',
+      to: email,
+      subject: `Félicitations ! Vous êtes pré-sélectionné(e) pour ${competitionTitle}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #1a1a2e;">Vous avez passé la première étape ! 🎉</h2>
+          <p>Bonjour ${firstName},</p>
+          <p>Nous avons d'excellentes nouvelles. Suite à l'évaluation préliminaire, vous faites partie des participants pré-sélectionnés pour :</p>
+          <div style="background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%); padding: 24px; border-radius: 12px; margin: 20px 0;">
+            <h3 style="color: #e94560; margin-top: 0;">${competitionTitle}</h3>
+            <p style="color: #eee; margin-bottom: 0;">Préparez-vous pour la prochaine phase décisive !</p>
+          </div>
+          <p>Connectez-vous à la plateforme pour consulter les détails et les prochaines étapes.</p>
+          <p style="margin-top: 30px; color: #666; font-size: 12px;">Cordialement,<br>L'équipe Arena of Coders</p>
+        </div>
+      `,
+    };
+
+    try {
+      await this.transporter.sendMail(mailOptions);
+    } catch (error) {
+      console.error('Failed to send pre-selection notification email:', error);
+      throw error;
+    }
+  }
 }

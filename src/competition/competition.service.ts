@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailService } from '../email/email.service';
+import { EmailQueueService } from '../email/email-queue.service';
 import { AntiCheatService } from '../anti-cheat/anti-cheat.service';
 import { OrchestratorAgent } from '../agents/orchestrator.agent';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -45,6 +46,7 @@ export class CompetitionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly emailService: EmailService,
+    private readonly emailQueueService: EmailQueueService,
     private readonly antiCheatService: AntiCheatService,
     private readonly orchestratorAgent: OrchestratorAgent,
     private readonly walletService: WalletService,
@@ -484,6 +486,21 @@ export class CompetitionService {
       });
     }
 
+    if (newStatus === CompetitionStatus.EVALUATING) {
+      this.emitEvent('competition.evaluating', {
+        competitionId,
+        title: competition.title,
+      });
+
+      // Automatically trigger pre-selection notifications
+      void this.notifyPreSelectedParticipants(competitionId, competition.createdBy)
+        .catch((err) =>
+          this.logger.error(
+            `Auto-notify pre-selection failed for ${competitionId}: ${err?.message ?? err}`,
+          ),
+        );
+    }
+
     if (newStatus === CompetitionStatus.COMPLETED) {
       this.emitEvent('competition.completed', {
         competitionId,
@@ -713,6 +730,61 @@ export class CompetitionService {
           user: row.user,
         };
       }),
+    };
+  }
+
+  /**
+   * Notifies the top N pre-selected participants by dispatching jobs to the Email queue.
+   */
+  async notifyPreSelectedParticipants(competitionId: string, userId: string) {
+    const competition = await this.findCompetitionById(competitionId);
+    
+    // Check permissions
+    if (competition.createdBy !== userId) {
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (user?.role !== UserRole.ADMIN) {
+        throw new ForbiddenException('Only the creator or an admin can notify pre-selected participants');
+      }
+    }
+
+    // Get the top participants
+    const topData = await this.getTopParticipants(competitionId, competition.topN);
+    const preselected = topData.preselected;
+
+    if (preselected.length === 0) {
+      throw new BadRequestException('No participants found to pre-select.');
+    }
+
+    let notifiedCount = 0;
+
+    for (const participant of preselected) {
+      // Check if already notified
+      const dbParticipant = await this.prisma.competitionParticipant.findUnique({
+        where: { id: participant.participantId }
+      });
+
+      if (!dbParticipant?.preSelectionNotified) {
+        // Enqueue background job
+        await this.emailQueueService.addPreSelectionEmailJob({
+          email: participant.user.email,
+          firstName: participant.user.firstName,
+          competitionTitle: competition.title
+        });
+
+        // Mark as notified to avoid spamming on subsequent clicks
+        await this.prisma.competitionParticipant.update({
+          where: { id: participant.participantId },
+          data: { preSelectionNotified: true }
+        });
+
+        notifiedCount++;
+      }
+    }
+
+    return {
+      success: true,
+      notifiedCount,
+      totalPreselected: preselected.length
     };
   }
 
