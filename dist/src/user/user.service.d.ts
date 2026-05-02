@@ -1,0 +1,157 @@
+import { PrismaService } from '../prisma/prisma.service';
+import { UserRole } from '@prisma/client';
+import type { UpdateProfileDto } from './dto/update-profile.dto';
+export interface CreateUserInput {
+    email: string;
+    passwordHash: string;
+    firstName: string;
+    lastName: string;
+    role?: UserRole;
+    githubUrl?: string;
+    linkedinUrl?: string;
+    avatarUrl?: string;
+    isEmailVerified?: boolean;
+}
+export declare class UserService {
+    private readonly prisma;
+    constructor(prisma: PrismaService);
+    findByEmail(email: string): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        githubUrl: string | null;
+        email: string;
+        passwordHash: string;
+        isEmailVerified: boolean;
+        role: import(".prisma/client").$Enums.UserRole;
+        firstName: string;
+        lastName: string;
+        avatarUrl: string | null;
+        cvUrl: string | null;
+        mainSpecialty: import(".prisma/client").$Enums.Specialty | null;
+        skillTags: string[];
+        linkedinUrl: string | null;
+        linkedinPosts: import("@prisma/client/runtime/library").JsonValue | null;
+        githubRepos: import("@prisma/client/runtime/library").JsonValue | null;
+        socialDataLastUpdate: Date | null;
+        totalChallenges: number;
+        totalWins: number;
+        walletBalance: number;
+        hederaAccountId: string | null;
+        isBanned: boolean;
+        bannedReason: string | null;
+        fcmToken: string | null;
+    } | null>;
+    requestCompanyRole(userId: string, dto: {
+        companyName: string;
+        description?: string;
+    }): Promise<{
+        id: string;
+        description: string | null;
+        status: import(".prisma/client").$Enums.RequestStatus;
+        createdAt: Date;
+        updatedAt: Date;
+        userId: string;
+        companyName: string;
+    }>;
+    findById(id: string): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        githubUrl: string | null;
+        email: string;
+        isEmailVerified: boolean;
+        role: import(".prisma/client").$Enums.UserRole;
+        firstName: string;
+        lastName: string;
+        avatarUrl: string | null;
+        mainSpecialty: import(".prisma/client").$Enums.Specialty | null;
+        skillTags: string[];
+        linkedinUrl: string | null;
+        linkedinPosts: import("@prisma/client/runtime/library").JsonValue;
+        githubRepos: import("@prisma/client/runtime/library").JsonValue;
+        socialDataLastUpdate: Date | null;
+        totalChallenges: number;
+        totalWins: number;
+        walletBalance: number;
+        hederaAccountId: string | null;
+        isBanned: boolean;
+    } | null>;
+    updateProfile(userId: string, dto: UpdateProfileDto): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        githubUrl: string | null;
+        email: string;
+        isEmailVerified: boolean;
+        role: import(".prisma/client").$Enums.UserRole;
+        firstName: string;
+        lastName: string;
+        avatarUrl: string | null;
+        mainSpecialty: import(".prisma/client").$Enums.Specialty | null;
+        skillTags: string[];
+        linkedinUrl: string | null;
+        linkedinPosts: import("@prisma/client/runtime/library").JsonValue;
+        githubRepos: import("@prisma/client/runtime/library").JsonValue;
+        socialDataLastUpdate: Date | null;
+        totalChallenges: number;
+        totalWins: number;
+        walletBalance: number;
+        hederaAccountId: string | null;
+        isBanned: boolean;
+    } | null>;
+    updatePasswordByEmail(email: string, passwordHash: string): Promise<void>;
+    updateWallet(userId: string, hederaAccountId: string): Promise<{
+        id: string;
+        hederaAccountId: string | null;
+    }>;
+    updateFcmToken(userId: string, fcmToken: string): Promise<{
+        id: string;
+        createdAt: Date;
+        updatedAt: Date;
+        githubUrl: string | null;
+        email: string;
+        passwordHash: string;
+        isEmailVerified: boolean;
+        role: import(".prisma/client").$Enums.UserRole;
+        firstName: string;
+        lastName: string;
+        avatarUrl: string | null;
+        cvUrl: string | null;
+        mainSpecialty: import(".prisma/client").$Enums.Specialty | null;
+        skillTags: string[];
+        linkedinUrl: string | null;
+        linkedinPosts: import("@prisma/client/runtime/library").JsonValue | null;
+        githubRepos: import("@prisma/client/runtime/library").JsonValue | null;
+        socialDataLastUpdate: Date | null;
+        totalChallenges: number;
+        totalWins: number;
+        walletBalance: number;
+        hederaAccountId: string | null;
+        isBanned: boolean;
+        bannedReason: string | null;
+        fcmToken: string | null;
+    }>;
+    create(data: CreateUserInput): Promise<{
+        id: string;
+        createdAt: Date;
+        email: string;
+        role: import(".prisma/client").$Enums.UserRole;
+        firstName: string;
+        lastName: string;
+    }>;
+    getLeaderboard(): Promise<{
+        total: number;
+        users: {
+            rank: number;
+            id: string;
+            firstName: string;
+            lastName: string;
+            email: string;
+            role: import(".prisma/client").$Enums.UserRole;
+            mainSpecialty: string;
+            xp: number;
+            skillTags: string[];
+        }[];
+    }>;
+}
