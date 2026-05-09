@@ -230,6 +230,39 @@ Afin de garantir l'intégrité du hackathon de bout en bout, l'application intè
 
 Contrairement à des scripts locaux simples, ces modèles sont déployés en tant que micro-services robustes sur **Hugging Face Spaces (via FastAPI)**. Le backend NestJS agit comme un **Proxy Sécurisé** (API Gateway) pour le frontend Flutter, protégeant ainsi les tokens d'accès et centralisant la logique métier.
 
+**Architecture d'Intégration (ASCII)** :
+```text
+[ PHASES DU HACKATHON ]
+
+1. PHASE DES CHECKPOINTS (Intermédiaire)
+ ┌─────────┐ multipart  ┌────────────────┐ proxy + token  ┌──────────────────────┐
+ │ Flutter ├───────────►│ NestJS Backend ├───────────────►│ Hugging Face Spaces  │
+ │ (Mobile)│ image/audio│ (AntiCheatCtrl)│                │ - Check Environnement│
+ └─────────┘            └────────────────┘                │ - Check Vocal        │
+                                                          └──────────────────────┘
+
+2. PHASE DE SOUMISSION FINALE (Code)
+                        ┌────────────────┐ payload JSON   ┌──────────────────────┐
+                        │ NestJS Backend ├───────────────►│ API FastAPI ML       │
+                        │ (Scoring Pipe) │                │ - AntiCheat Code     │
+                        └────────────────┘                └──────────────────────┘
+```
+
+**Architecture d'Intégration (Mermaid)** :
+```mermaid
+flowchart TB
+  subgraph Phase 1 : Validation des Checkpoints
+    direction LR
+    F1[Frontend Flutter<br/>Image / Audio] -- "Multipart<br/>HTTP" --> B1[Backend NestJS<br/>AntiCheatController]
+    B1 -- "Axios Proxy<br/>+ HF Token" --> HF1[Hugging Face Spaces<br/>Environnement & Vocal]
+  end
+
+  subgraph Phase 2 : Soumission Finale
+    direction LR
+    B2[Backend NestJS<br/>Scoring Pipeline] -- "JSON Payload<br/>(Code Source)" --> HF2[API FastAPI<br/>AntiCheat Code]
+  end
+```
+
 #### 1. Modèle Check Envirement (Validation Visuelle de l'Espace de Travail)
 - **Le Besoin Métier** : S'assurer que le participant est bien devant son ordinateur, en train de coder, et qu'il n'utilise pas de méthodes de triche visuelle (photo d'un autre écran, images d'illustration trouvées sur internet, ou usurpation d'identité).
 - **Architecture Technique (ML)** : Ce modèle repose sur **Hugging Face CLIP** (`openai/clip-vit-base-patch32`) pour réaliser une classification visuelle *Zero-Shot* extrêmement rapide (génération d'embeddings à 512 dimensions). Il intègre également la bibliothèque **DeepFace** (modèle VGG-Face) pour effectuer une vérification biométrique en croisant le visage présent sur la photo de l'environnement avec l'avatar de référence du participant.
