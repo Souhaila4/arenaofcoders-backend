@@ -251,41 +251,76 @@ Contrairement à des scripts locaux simples, ces modèles sont déployés en tan
 **Architecture d'Intégration (Mermaid)** :
 ```mermaid
 flowchart TB
-  subgraph Phase 1 : Validation des Checkpoints
+  subgraph Phase1 ["Phase 1 : Validation des Checkpoints"]
     direction LR
     F1[Frontend Flutter<br/>Image / Audio] -- "Multipart<br/>HTTP" --> B1[Backend NestJS<br/>AntiCheatController]
     B1 -- "Axios Proxy<br/>+ HF Token" --> HF1[Hugging Face Spaces<br/>Environnement & Vocal]
   end
 
-  subgraph Phase 2 : Soumission Finale
+  subgraph Phase2 ["Phase 2 : Soumission Finale"]
     direction LR
     B2[Backend NestJS<br/>Scoring Pipeline] -- "JSON Payload<br/>(Code Source)" --> HF2[API FastAPI<br/>AntiCheat Code]
   end
+
+  %% Invisible link to force vertical ordering (Phase 1 above Phase 2)
+  F1 ~~~ B2
 ```
 
-#### 1. Modèle Check Envirement (Validation Visuelle de l'Espace de Travail)
-- **Le Besoin Métier** : S'assurer que le participant est bien devant son ordinateur, en train de coder, et qu'il n'utilise pas de méthodes de triche visuelle (photo d'un autre écran, images d'illustration trouvées sur internet, ou usurpation d'identité).
-- **Architecture Technique (ML)** : Ce modèle repose sur **Hugging Face CLIP** (`openai/clip-vit-base-patch32`) pour réaliser une classification visuelle *Zero-Shot* extrêmement rapide (génération d'embeddings à 512 dimensions). Il intègre également la bibliothèque **DeepFace** (modèle VGG-Face) pour effectuer une vérification biométrique en croisant le visage présent sur la photo de l'environnement avec l'avatar de référence du participant.
-- **Innovation (Mémoire FAISS)** : Le modèle possède une base de données vectorielle **FAISS** (IndexFlatL2). Lorsqu'une image obtient un score *Zero-Shot* de très haute confiance (>90%), son embedding est mémorisé. Lors des vérifications futures, le modèle calcule la distance L2 avec ses souvenirs : si l'environnement est similaire à un setup validé, le système accorde un "bonus de confiance" adaptatif (jusqu'à +20%).
-- **Flux de Consommation (Frontend & Backend)** :
-  1. **Frontend (Flutter)** : L'application mobile guide le participant pour prendre une photo (visage + écran) en utilisant `ImagePicker`. Le fichier est formaté et envoyé au backend via une requête HTTP Multipart.
-  2. **Backend (NestJS)** : Le contrôleur dédié (`AntiCheatController`, `POST /validate-image`) intercepte le fichier grâce à `@UseInterceptors(FileFieldsInterceptor)`. Il crée un objet `FormData` avec le buffer en mémoire, puis déclenche un appel `axios.post` vers `negzaoui-antiimagesenvirement.hf.space/scan`. Le secret `HUGGINGFACE_TOKEN` est injecté discrètement dans les headers `Authorization`, assurant une communication Cloud-to-Cloud sécurisée. Le résultat détermine immédiatement l'acceptation ou le rejet du checkpoint visuel.
+#### 📸 1. Modèle Check Envirement (Validation Visuelle de l'Espace de Travail)
 
-#### 2. Modèle Check Vocal (Analyse de la Cohérence Sémantique Audio)
-- **Le Besoin Métier** : Empêcher un candidat de soumettre du code sans le comprendre. Le candidat doit s'enregistrer vocalement en expliquant son travail. L'IA doit vérifier s'il parle réellement de développement logiciel ou s'il s'agit de bruits de fond, de discussions hors sujet (jeux, sommeil, repas).
-- **Architecture Technique (ML)** : Le modèle effectue d'abord du Speech-to-Text grâce à **Whisper** (`openai/whisper-tiny`), capable de retranscrire des audios multilingues. Le texte extrait passe ensuite dans un pipeline NLP *Zero-Shot* basé sur **mDeBERTa-v3** (`MoritzLaurer/mDeBERTa-v3-base-mnli-xnli`) pour classer sémantiquement les propos.
-- **Innovation (Mémoire Sémantique)** : La transcription est encodée en un vecteur de 384 dimensions par `sentence-transformers/all-MiniLM-L6-v2`. Le système compare ce vecteur aux explications précédemment validées via FAISS. Si la similarité cosinus excède 0.85, le modèle comprend que le candidat utilise le "jargon technique" de l'épreuve et lui accorde un bonus de +20%.
-- **Flux de Consommation (Frontend & Backend)** :
-  1. **Frontend (Flutter)** : Le participant enregistre son explication via le package `record`. L'audio est encodé en `AudioEncoder.aacLc` (format M4A) pour optimiser le transfert réseau, puis poussé au serveur.
-  2. **Backend (NestJS)** : Le routeur `POST /validate-audio` agit à nouveau en proxy vers `negzaoui-modelevocal.hf.space/scan-audio`. Une gestion d'erreur complexe, incluant un *timeout* étendu à 90 secondes, est configurée dans Axios pour absorber intelligemment le temps de réveil ("cold start") inhérent aux espaces Hugging Face privés.
+> **🎯 Le Besoin Métier** : S'assurer que le participant est bien devant son ordinateur, en train de coder, et qu'il n'utilise pas de méthodes de triche visuelle (photo d'un autre écran, images d'illustration trouvées sur internet, ou usurpation d'identité).
 
-#### 3. Modèle AntiCheat (Évaluation Avancée du Code Source)
-- **Le Besoin Métier** : Intercepter les dépôts GitHub contenant du code généré massivement par IA, plagié sur d'autres projets, ou simplement copié-collé sans effort de logique algorithmique.
-- **Architecture Technique (ML)** : Il s'agit d'une API FastAPI exécutant un modèle de Machine Learning. Il extrait d'abord de nombreuses caractéristiques (features) structurelles du code (complexité cyclomatique, variance d'indentation, fréquence des commentaires). Ces données nourrissent un **RandomForestClassifier** (Scikit-Learn) pour évaluer la probabilité d'une génération par IA. En parallèle, une analyse de texte par **TF-IDF + Cosine Similarity** détecte les plagiats partiels ou totaux.
-- **Système de Scoring** : Le verdict final est pondéré selon une formule mathématique précise : `FinalScore = 0.4 * score_ia + 0.3 * score_plagiat + 0.3 * score_copy_paste`.
-- **Flux de Consommation & Entraînement** :
-  - **Backend (NestJS)** : Ce modèle intervient lors du pipeline d'orchestration (`Scoring Pipeline`). L'agent d'orchestration extrait le code source et l'envoie (via payload JSON) à l'API. La pénalité retournée impacte directement le score de l'équipe.
-  - **Apprentissage Actif (Human-in-the-loop)** : Contrairement aux deux modèles précédents, l'apprentissage de l'AntiCheat se fait par cycles contrôlés. Chaque analyse est sauvegardée. Une route `POST /human_decision` permet aux superviseurs de flagger manuellement les codes suspects, constituant un nouveau dataset d'entraînement pour générer un `.pkl` plus précis via un script de ré-entraînement (`src.training`).
+**⚙️ Architecture Technique & Innovation**
+| Composant | Technologie | Rôle |
+| :--- | :--- | :--- |
+| **Vision Zero-Shot** | `Hugging Face CLIP` | Classification extrêmement rapide (512-dim) de l'environnement de travail. |
+| **Biométrie** | `DeepFace` (VGG-Face) | Croisement facial entre la photo prise et l'avatar de référence du candidat. |
+| **Mémoire Active** | `FAISS` (IndexFlatL2) | **Innovation** : Mémorise les environnements valides pour accorder un bonus adaptatif (+20%). |
+
+**🔄 Flux de Traitement Interne**
+```mermaid
+flowchart LR
+    A(Image Capturée) --> B{CLIP Zero-Shot}
+    B -- Score > 90% --> C[(FAISS Memory)]
+    B -- Score < 90% --> D(Rejet de la triche)
+    C --> E[DeepFace Biométrie]
+    E --> F[Validation Checkpoint]
+```
+
+#### 🎙️ 2. Modèle Check Vocal (Analyse de la Cohérence Sémantique Audio)
+
+> **🎯 Le Besoin Métier** : Empêcher un candidat de soumettre du code sans le comprendre. L'IA vérifie s'il explique réellement son travail algorithmique ou s'il s'agit de bruits de fond/hors-sujet.
+
+**⚙️ Architecture Technique & Innovation**
+| Composant | Technologie | Rôle |
+| :--- | :--- | :--- |
+| **Speech-to-Text** | `Whisper-tiny` | Retranscription multilingue de l'audio envoyé par le candidat (support 16kHz). |
+| **NLP Zero-Shot** | `mDeBERTa-v3` | Classification sémantique du texte (Technique vs Loisir/Bruit). |
+| **Mémoire Sémantique** | `sentence-transformers` + `FAISS` | **Innovation** : Encodage (384-dim) pour comparer avec le jargon validé (bonus +20%). |
+
+**🔄 Flux de Traitement Interne**
+```mermaid
+flowchart LR
+    A(Audio M4A) --> B[Whisper STT]
+    B --> C{mDeBERTa NLP}
+    C -- "Jargon Code" --> D[(FAISS Semantic)]
+    C -- "Hors-sujet" --> E(Rejet Audio)
+    D --> F[Bonus Similarité +20%]
+```
+
+#### 🕵️‍♂️ 3. Modèle AntiCheat (Évaluation Avancée du Code Source)
+
+> **🎯 Le Besoin Métier** : Intercepter les dépôts GitHub contenant du code généré massivement par IA, plagié sur d'autres projets, ou simplement copié-collé sans effort de logique.
+
+**⚙️ Architecture Technique & Innovation**
+| Composant | Technologie | Rôle |
+| :--- | :--- | :--- |
+| **Machine Learning** | `RandomForestClassifier` | Évaluation de la probabilité IA basée sur la complexité et la variance d'indentation. |
+| **Détection Plagiat** | `TF-IDF` + `Cosine Similarity` | Analyse comparative des textes pour détecter le copier-coller parfait ou partiel. |
+| **Human-in-the-loop** | `FastAPI` (Cycles manuels) | **Innovation** : Apprentissage actif via les décisions humaines (`human_decisions.jsonl`). |
+
+**📊 Formule de Scoring Mathématique :**  
+`FinalScore = 0.4 * score_ia + 0.3 * score_plagiat + 0.3 * score_copy_paste`
 
 ---
 
