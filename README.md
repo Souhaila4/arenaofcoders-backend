@@ -336,14 +336,14 @@ flowchart LR
 **🔄 Flux de Traitement Interne (NestJS)**
 ```mermaid
 flowchart TD
-    A[Soumission Checkpoint] --> B{Est-ce le CP 1 ?}
-    B -- Oui --> C[Validation Présentiel & Verrouillage URL<br/>(Le dépôt peut être vide)]
-    B -- Non --> D{L'URL correspond-elle au CP1 ?}
-    D -- Non --> E(Rejet Anti-Triche)
-    D -- Oui --> F[Agent IA : Extraction du Code]
-    F --> G{Avancement de Code > 0 ?}
-    G -- Oui --> H[Validation Checkpoint]
-    G -- Non --> I(Rejet temporaire / Activation du Joker)
+    A["Soumission Checkpoint"] --> B{"Est-ce le CP 1 ?"}
+    B -- Oui --> C["Validation Présentiel & Verrouillage URL<br/>(Le dépôt peut être vide)"]
+    B -- "Non (CP 2, 3...)" --> D{"L'URL correspond-elle au CP1 ?"}
+    D -- Non --> E("Rejet Anti-Triche")
+    D -- Oui --> F["Agent IA : Extraction du Code"]
+    F --> G{"Avancement de Code > 0 ?"}
+    G -- Oui --> H["Validation Checkpoint"]
+    G -- Non --> I("Rejet temporaire / Activation du Joker")
 ```
 
 ---
