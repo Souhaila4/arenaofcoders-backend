@@ -329,15 +329,15 @@ flowchart LR
 **⚙️ Architecture Technique & Innovation**
 | Composant | Rôle & Mécanique |
 | :--- | :--- |
-| **Verrouillage de Dépôt (CP1)** | Lors du 1er checkpoint, le backend valide que le lien GitHub existe et est public. Il "verrouille" cette URL de base (`baseRepositoryUrl`). Pour les checkpoints suivants (CP2, CP3...), toute soumission avec un lien différent est automatiquement rejetée (Sécurité Anti-Changement de projet). |
-| **Analyse d'Avancement (CP > 1)** | L'orchestrateur NestJS utilise un Agent IA pour extraire l'arborescence du code. Le système calcule la progression mathématique : `Nouveaux Fichiers = Fichiers Actuels - Fichiers CP Précédent`. Si ce delta est `<= 0`, le checkpoint est refusé car l'équipe n'a rien codé. |
+| **Présentiel & Verrouillage (CP1)** | Lors du 1er checkpoint, l'IA n'analyse pas encore le code. Le système vérifie d'abord la **présence physique** (présentiel) de l'utilisateur via la photo (Modèle Visuel), puis il valide que le lien GitHub existe et est public. Il "verrouille" ensuite cette URL de base (`baseRepositoryUrl`). Pour les checkpoints suivants, toute soumission avec un lien différent est rejetée. |
+| **Analyse d'Avancement (CP > 1)** | À partir du Checkpoint 2, l'orchestrateur NestJS utilise un Agent IA pour extraire l'arborescence du code. Le système calcule la progression mathématique : `Nouveaux Fichiers = Fichiers Actuels - Fichiers CP Précédent`. Si ce delta est `<= 0`, le checkpoint est refusé car l'équipe n'a rien codé. |
 | **Système "Joker" (Grace Period)** | **Innovation** : L'approche n'est pas purement punitive. Si un participant échoue à démontrer un avancement, le système gère une machine à états (State Machine) qui lui accorde un joker (Extra Life) temporel pour corriger son repo avant la disqualification définitive. |
 
 **🔄 Flux de Traitement Interne (NestJS)**
 ```mermaid
 flowchart TD
     A[Soumission Checkpoint] --> B{Est-ce le CP 1 ?}
-    B -- Oui --> C[Validation GitHub & Verrouillage URL]
+    B -- Oui --> C[Validation Présentiel & Verrouillage URL]
     B -- Non --> D{L'URL correspond-elle au CP1 ?}
     D -- Non --> E(Rejet Anti-Triche)
     D -- Oui --> F[Agent IA : Extraction du Code]
