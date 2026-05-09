@@ -322,6 +322,30 @@ flowchart LR
 **📊 Formule de Scoring Mathématique :**  
 `FinalScore = 0.4 * score_ia + 0.3 * score_plagiat + 0.3 * score_copy_paste`
 
+#### ⏳ 4. Modèle d'Avancement Temporel & Sécurité des Dépôts (Checkpoints)
+
+> **🎯 Le Besoin Métier** : S'assurer que les participants travaillent sur un seul et même projet tout au long du hackathon et qu'ils produisent *réellement* du code entre deux checkpoints, empêchant ainsi la soumission de dépôts "coquilles vides" ou de projets pré-existants.
+
+**⚙️ Architecture Technique & Innovation**
+| Composant | Rôle & Mécanique |
+| :--- | :--- |
+| **Verrouillage de Dépôt (CP1)** | Lors du 1er checkpoint, le backend valide que le lien GitHub existe et est public. Il "verrouille" cette URL de base (`baseRepositoryUrl`). Pour les checkpoints suivants (CP2, CP3...), toute soumission avec un lien différent est automatiquement rejetée (Sécurité Anti-Changement de projet). |
+| **Analyse d'Avancement (CP > 1)** | L'orchestrateur NestJS utilise un Agent IA pour extraire l'arborescence du code. Le système calcule la progression mathématique : `Nouveaux Fichiers = Fichiers Actuels - Fichiers CP Précédent`. Si ce delta est `<= 0`, le checkpoint est refusé car l'équipe n'a rien codé. |
+| **Système "Joker" (Grace Period)** | **Innovation** : L'approche n'est pas purement punitive. Si un participant échoue à démontrer un avancement, le système gère une machine à états (State Machine) qui lui accorde un joker (Extra Life) temporel pour corriger son repo avant la disqualification définitive. |
+
+**🔄 Flux de Traitement Interne (NestJS)**
+```mermaid
+flowchart TD
+    A[Soumission Checkpoint] --> B{Est-ce le CP 1 ?}
+    B -- Oui --> C[Validation GitHub & Verrouillage URL]
+    B -- Non --> D{L'URL correspond-elle au CP1 ?}
+    D -- Non --> E(Rejet Anti-Triche)
+    D -- Oui --> F[Agent IA : Extraction du Code]
+    F --> G{Avancement de Code > 0 ?}
+    G -- Oui --> H[Validation Checkpoint]
+    G -- Non --> I(Rejet temporaire / Activation du Joker)
+```
+
 ---
 
 ## 7. Agent scoring pipeline (orchestrator)
