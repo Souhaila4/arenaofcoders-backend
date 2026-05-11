@@ -23,7 +23,8 @@ import {
 
 // CommonJS-compatible imports for modules that ship as CJS defaults
 
-const sharp: (input: string) => import('sharp').Sharp = require('sharp');
+const sharp: (input: string | Buffer) => import('sharp').Sharp =
+  require('sharp');
 
 const FormData = require('form-data');
 
@@ -148,7 +149,9 @@ export class CertificateService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  //  STEP 1 — Generate image with Sharp + SVG overlay
+  //  STEP 1 — Certificate image (Sharp rasterizes SVG — no JPG required)
+  //  Design: landscape, navy + gold, border & corners (template-style).
+  //  Optional: if cretif/arena_Certificate.jpg exists, text is overlaid on it.
   // ─────────────────────────────────────────────────────────────────
   private async generateImage(
     firstName: string,
@@ -161,35 +164,117 @@ export class CertificateService {
       'arena_Certificate.jpg',
     );
 
-    if (!fs.existsSync(templatePath)) {
-      throw new InternalServerErrorException(
-        `Certificate template not found at ${templatePath}`,
-      );
-    }
-
-    // Get template dimensions
-    const meta = await sharp(templatePath).metadata();
-    const W = meta.width ?? 1360;
-    const H = meta.height ?? 960;
-
-    const fullName = `${firstName} ${lastName}`;
-    const date = new Date().toLocaleDateString('en-GB', {
+    const fullName = `${firstName} ${lastName}`.trim();
+    const date = new Date().toLocaleDateString('fr-FR', {
       day: '2-digit',
       month: 'long',
       year: 'numeric',
     });
 
-    // Escape XML special chars to avoid broken SVG
-    const escapeXml = (s: string) =>
-      s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
+    if (fs.existsSync(templatePath)) {
+      return this.compositeTextOnTemplate(
+        templatePath,
+        fullName,
+        hackathonName,
+        date,
+      );
+    }
+
+    const svg = this.buildCertificateVectorSvg(
+      fullName,
+      hackathonName,
+      date,
+    );
+    return sharp(Buffer.from(svg, 'utf-8'))
+      .resize(1360, 960, { fit: 'fill' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+  }
+
+  private escapeXml(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /** Full certificate as SVG (navy / gold professional layout). */
+  private buildCertificateVectorSvg(
+    fullName: string,
+    hackathonName: string,
+    dateStr: string,
+  ): string {
+    const W = 1360;
+    const H = 960;
+    const navy = '#1A237E';
+    const gold = '#D4AF37';
+    const goldLight = '#E8D48B';
+
+    const name = this.escapeXml(fullName);
+    const hack = this.escapeXml(hackathonName);
+    const date = this.escapeXml(dateStr);
+
+    const nameFont = fullName.length > 28 ? 42 : fullName.length > 20 ? 48 : 56;
+    const hackFont = hackathonName.length > 42 ? 20 : 24;
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <defs>
+    <linearGradient id="gGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:${goldLight}"/>
+      <stop offset="100%" style="stop-color:${gold}"/>
+    </linearGradient>
+    <linearGradient id="gWave" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:${navy}"/>
+      <stop offset="100%" style="stop-color:#283593"/>
+    </linearGradient>
+  </defs>
+  <rect width="${W}" height="${H}" fill="#ffffff"/>
+  <!-- Top corner accents -->
+  <polygon points="0,0 220,0 0,160" fill="${navy}"/>
+  <polygon points="0,0 200,0 0,140" fill="url(#gGold)" opacity="0.92"/>
+  <polygon points="${W},0 ${W - 220},0 ${W},160" fill="${navy}"/>
+  <polygon points="${W},0 ${W - 200},0 ${W},130" fill="url(#gGold)" opacity="0.88"/>
+  <!-- Bottom decorative waves -->
+  <path d="M0 ${H} L0 ${H - 200} C 120 ${H - 240} 240 ${H - 180} 360 ${H - 200} C 480 ${H - 220} 520 ${H - 160} 600 ${H - 190} L 600 ${H} Z" fill="url(#gWave)"/>
+  <path d="M0 ${H} L0 ${H - 120} C 140 ${H - 100} 200 ${H - 160} 320 ${H - 130} L 400 ${H} Z" fill="${gold}" opacity="0.35"/>
+  <path d="M${W} ${H} L${W} ${H - 200} C ${W - 120} ${H - 240} ${W - 240} ${H - 180} ${W - 360} ${H - 200} C ${W - 480} ${H - 220} ${W - 520} ${H - 160} ${W - 600} ${H - 190} L ${W - 600} ${H} Z" fill="url(#gWave)"/>
+  <path d="M${W} ${H} L${W} ${H - 120} C ${W - 140} ${H - 100} ${W - 200} ${H - 160} ${W - 320} ${H - 130} L ${W - 400} ${H} Z" fill="${gold}" opacity="0.35"/>
+  <!-- Double gold frame -->
+  <rect x="36" y="36" width="${W - 72}" height="${H - 72}" fill="none" stroke="${gold}" stroke-width="5" rx="2"/>
+  <rect x="52" y="52" width="${W - 104}" height="${H - 104}" fill="none" stroke="${navy}" stroke-width="1.5" opacity="0.35" rx="1"/>
+  <!-- Typography -->
+  <text x="${W / 2}" y="168" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="64" font-weight="800" fill="${navy}" letter-spacing="10">CERTIFICATE</text>
+  <text x="${W / 2}" y="228" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="34" font-weight="700" fill="${navy}">Of Achievement</text>
+  <text x="${W / 2}" y="302" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="20" fill="${navy}" opacity="0.9">This Certificate is Proudly Presented To</text>
+  <text x="${W / 2}" y="392" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="${nameFont}" font-weight="700" fill="${navy}">${name}</text>
+  <line x1="${W / 2 - 380}" y1="408" x2="${W / 2 + 380}" y2="408" stroke="${navy}" stroke-width="4" stroke-linecap="square"/>
+  <text x="${W / 2}" y="478" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="${hackFont}" font-weight="600" fill="${gold}" letter-spacing="2">${hack}</text>
+  <text x="${W / 2}" y="532" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="17" fill="#555555">${date}</text>
+  <!-- Seal -->
+  <g transform="translate(${W / 2}, ${H - 88})">
+    <circle r="52" fill="none" stroke="${gold}" stroke-width="5"/>
+    <circle r="44" fill="none" stroke="${navy}" stroke-width="1.5" opacity="0.5"/>
+    <path d="M -38 38 Q -48 72 -28 88 L -18 78 Q -28 58 -22 38 Z" fill="${gold}"/>
+    <path d="M 38 38 Q 48 72 28 88 L 18 78 Q 28 58 22 38 Z" fill="${gold}"/>
+    <text y="8" text-anchor="middle" font-family="Georgia, serif" font-size="11" fill="${navy}" font-weight="700">ARENA</text>
+  </g>
+</svg>`;
+  }
+
+  private async compositeTextOnTemplate(
+    templatePath: string,
+    fullName: string,
+    hackathonName: string,
+    dateStr: string,
+  ): Promise<Buffer> {
+    const meta = await sharp(templatePath).metadata();
+    const W = meta.width ?? 1360;
+    const H = meta.height ?? 960;
 
     const textSvg = `
       <svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-        <!-- Full name -->
         <text
           x="${W / 2}"
           y="${Math.round(H * 0.5)}"
@@ -197,21 +282,17 @@ export class CertificateService {
           font-family="Georgia, 'Times New Roman', serif"
           font-size="${Math.round(W * 0.055)}"
           font-weight="bold"
-          fill="#1a1a4e"
-        >${escapeXml(fullName)}</text>
-
-        <!-- Hackathon name -->
+          fill="#1A237E"
+        >${this.escapeXml(fullName)}</text>
         <text
           x="${W / 2}"
           y="${Math.round(H * 0.6)}"
           text-anchor="middle"
           font-family="Arial, sans-serif"
           font-size="${Math.round(W * 0.026)}"
-          fill="#c8a84b"
+          fill="#D4AF37"
           letter-spacing="3"
-        >${escapeXml(hackathonName)}</text>
-
-        <!-- Date -->
+        >${this.escapeXml(hackathonName)}</text>
         <text
           x="${W / 2}"
           y="${Math.round(H * 0.68)}"
@@ -219,22 +300,14 @@ export class CertificateService {
           font-family="Arial, sans-serif"
           font-size="${Math.round(W * 0.018)}"
           fill="#555555"
-        >${escapeXml(date)}</text>
+        >${this.escapeXml(dateStr)}</text>
       </svg>
     `;
 
-    const result = await sharp(templatePath)
-      .composite([
-        {
-          input: Buffer.from(textSvg),
-          top: 0,
-          left: 0,
-        },
-      ])
+    return sharp(templatePath)
+      .composite([{ input: Buffer.from(textSvg), top: 0, left: 0 }])
       .jpeg({ quality: 92 })
       .toBuffer();
-
-    return result;
   }
 
   // ─────────────────────────────────────────────────────────────────

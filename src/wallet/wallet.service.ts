@@ -5,20 +5,17 @@ import {
   BadRequestException,
   NotFoundException,
   HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios, { type AxiosResponse } from 'axios';
-import { PrismaService } from '../prisma/prisma.service';
-import type {
-  AdminMirrorArenaTransactionsResult,
-  ArenaMirrorTransactionItem,
-  MirrorTokenTransferRow,
-  MirrorTransactionRow,
-  MirrorTransactionsResponse,
-} from './mirror-arena.types';
-import { ProofEncryptionService } from './proof-encryption.service';
-import { HederaProofAnchorService } from './hedera-proof-anchor.service';
+import axios from 'axios';
+import { createHash } from 'crypto';
+import { createReadStream, existsSync } from 'fs';
+import { mkdir, writeFile } from 'fs/promises';
 import * as path from 'path';
+import type { Express } from 'express-serve-static-core';
+import { PrismaService } from '../prisma/prisma.service';
+import { hederaAccountIdLookupVariants } from '../common/hedera-account.util';
 import {
   Client,
   PrivateKey,
@@ -30,11 +27,41 @@ import {
 import {
   TransactionType,
   TransactionStatus,
-  ArenaCoinFundingMintStatus,
-  UserRole,
-  FundingPaymentMethod,
 } from '@prisma/client';
-import { hederaAccountIdLookupVariants, canonicalHederaAccountId } from '../common/hedera-account.util';
+
+/** Même instance que `PrismaService` ; `walletAdminFunding` vient du client Prisma généré (`prisma generate`). */
+type PrismaForWalletFunding = PrismaService & {
+  readonly walletAdminFunding: any;
+};
+
+interface MirrorTokenTransfer {
+  token_id?: string;
+  account?: string;
+  amount?: string | number;
+}
+
+interface MirrorTransaction {
+  consensus_timestamp?: string;
+  transaction_id?: string;
+  name?: string;
+  result?: string;
+  token_transfers?: MirrorTokenTransfer[];
+}
+
+interface MirrorTransactionsResponse {
+  transactions?: MirrorTransaction[];
+  _links?: { next?: { href?: string } };
+}
+
+function consensusTimestampToIso(ts: string): string {
+  if (!ts || !ts.includes('.')) return '';
+  const [sec, frac = '0'] = ts.split('.');
+  const s = Number.parseInt(sec, 10);
+  if (Number.isNaN(s)) return '';
+  const nanoStr = frac.padEnd(9, '0').slice(0, 9);
+  const nano = Number.parseInt(nanoStr, 10) || 0;
+  return new Date(s * 1000 + nano / 1_000_000).toISOString();
+}
 
 @Injectable()
 export class WalletService {
@@ -43,9 +70,11 @@ export class WalletService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    private readonly proofEncryption: ProofEncryptionService,
-    private readonly hederaProofAnchor: HederaProofAnchorService,
   ) {}
+
+  private prismaFunding(): PrismaForWalletFunding {
+    return this.prisma as PrismaForWalletFunding;
+  }
 
   // ─────────────────────────────────────────────────────────────────
   //  HELPERS — Hedera client setup
@@ -84,212 +113,14 @@ export class WalletService {
     return atomic / 100;
   }
 
-  /** Admin: preview recipient linked to a Hedera account (before mint). */
-  async getWalletRecipientPreviewForAdmin(hederaAccountId: string) {
-    const variants = hederaAccountIdLookupVariants(hederaAccountId);
-    const user = await this.prisma.user.findFirst({
-      where: { hederaAccountId: { in: variants } },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        hederaAccountId: true,
-        email: true,
-      },
-    });
-    if (!user) {
-      throw new NotFoundException(
-        'No user registered with this Hedera wallet ID',
-      );
-    }
-    return {
-      userId: user.id,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      hederaAccountId: user.hederaAccountId,
-      email: user.email,
-    };
-  }
-
-  /**
-   * Admin: mint on-chain + crédit solde app (JSON).
-   * userId OU hederaAccountId (pas les deux) — pour l’app mobile « Envoyer ARENA ».
-   */
-  async adminMintArenaCoinsDirect(params: {
-    userId?: string;
-    hederaAccountId?: string;
-    amount: number;
-  }) {
-    const amount = params.amount;
-    const uid = params.userId?.trim();
-    const hid = params.hederaAccountId?.trim();
-
-    if (uid && hid) {
-      throw new BadRequestException(
-        'Provide only one of userId or hederaAccountId',
-      );
-    }
-    if (!uid && !hid) {
-      throw new BadRequestException('Provide userId or hederaAccountId');
-    }
-
-    let resolvedUserId = uid ?? '';
-    if (hid) {
-      const variants = hederaAccountIdLookupVariants(hid);
-      const found = await this.prisma.user.findFirst({
-        where: { hederaAccountId: { in: variants } },
-        select: { id: true },
-      });
-      if (!found) {
-        throw new NotFoundException(
-          'No user registered with this Hedera wallet ID',
-        );
-      }
-      resolvedUserId = found.id;
-    }
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: resolvedUserId },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        role: true,
-        hederaAccountId: true,
-        walletBalance: true,
-      },
-    });
-    if (!user) throw new NotFoundException('User not found');
-    if (!user.hederaAccountId) {
-      throw new BadRequestException(
-        'This user has not registered a Hedera wallet. Ask them to use PATCH /user/wallet first.',
-      );
-    }
-
-    const tokenIdStr = this.config.get<string>('ARENA_COIN_TOKEN_ID')!;
-    if (!tokenIdStr) {
-      throw new InternalServerErrorException(
-        'ARENA_COIN_TOKEN_ID is not configured in .env',
-      );
-    }
-
-    const { client, operatorId, operatorKey } = this.buildClient();
-    const tokenId = this.arenaTokenId;
-    const recipientAccountCanonical = canonicalHederaAccountId(
-      user.hederaAccountId!,
-    );
-    const recipientId = AccountId.fromString(recipientAccountCanonical);
-    const atomicAmount = this.toAtomicUnits(amount);
-
-    let hederaTxId: string | null = null;
-    let txStatus: TransactionStatus = TransactionStatus.SUCCESS;
-    let errorNote: string | null = null;
-
-    try {
-      const mintTx = await new TokenMintTransaction()
-        .setTokenId(tokenId)
-        .setAmount(atomicAmount)
-        .freezeWith(client)
-        .sign(operatorKey);
-      const mintSubmit = await mintTx.execute(client);
-      await mintSubmit.getReceipt(client);
-      this.logger.log(`Minted ${amount} ARENA to treasury`);
-
-      const transferTx = await new TransferTransaction()
-        .addTokenTransfer(tokenId, operatorId, -atomicAmount)
-        .addTokenTransfer(tokenId, recipientId, atomicAmount)
-        .freezeWith(client)
-        .sign(operatorKey);
-
-      const transferSubmit = await transferTx.execute(client);
-      const receipt = await transferSubmit.getReceipt(client);
-      hederaTxId = transferSubmit.transactionId.toString();
-
-      this.logger.log(
-        `Transferred ${amount} ARENA → ${recipientAccountCanonical} (${String(receipt.status)})`,
-      );
-    } catch (err: unknown) {
-      const msg: string = err instanceof Error ? err.message : String(err);
-
-      if (msg.includes('TOKEN_NOT_ASSOCIATED_TO_ACCOUNT')) {
-        txStatus = TransactionStatus.PENDING_ASSOCIATION;
-        errorNote = `The company has not associated Arena Coin (${tokenIdStr}) with their wallet yet. Ask them to associate it in HashPack.`;
-        this.logger.warn(
-          `[MINT] Token not associated: ${recipientAccountCanonical}`,
-        );
-      } else {
-        txStatus = TransactionStatus.FAILED;
-        errorNote = msg;
-        this.logger.error('[MINT] Transfer failed', msg);
-        await this.logTransaction({
-          senderAccountId: 'TREASURY',
-          receiverAccountId: user.hederaAccountId,
-          amount,
-          type: TransactionType.ADMIN_MINT,
-          status: txStatus,
-          errorNote,
-          hederaTransactionId: hederaTxId ?? undefined,
-        });
-        throw new InternalServerErrorException(`Failed to mint coins: ${msg}`);
-      }
-    } finally {
-      client.close();
-    }
-
-    const isSuccess = txStatus === TransactionStatus.SUCCESS;
-    if (isSuccess) {
-      await this.prisma.user.update({
-        where: { id: resolvedUserId },
-        data: { walletBalance: { increment: amount } },
-      });
-    }
-
-    const log = await this.logTransaction({
-      senderAccountId: 'TREASURY',
-      receiverAccountId: user.hederaAccountId,
-      amount,
-      type: TransactionType.ADMIN_MINT,
-      status: txStatus,
-      errorNote: errorNote ?? undefined,
-      hederaTransactionId: hederaTxId ?? undefined,
-    });
-
-    return {
-      success: isSuccess,
-      userId: resolvedUserId,
-      recipientAccountId: user.hederaAccountId,
-      amount,
-      newBalance: isSuccess ? user.walletBalance + amount : user.walletBalance,
-      transactionLogId: log.id,
-      hederaTransactionId: hederaTxId,
-      ...(errorNote && { note: errorNote }),
-    };
-  }
-
   // ─────────────────────────────────────────────────────────────────
-  //  1. ADMIN MINT COINS → Company wallet (avec traçabilité paiement fiat)
+  //  1. ADMIN MINT COINS → Company wallet
+  //     Called by admin to credit coins into a company's Hedera wallet.
+  //     This mints new tokens from the supply key and transfers them.
   // ─────────────────────────────────────────────────────────────────
 
-  /** Données formulaire : origine des fonds avant conversion en Arena Coins */
-  async adminMintToCompany(
-    userId: string,
-    amount: number,
-    trace: {
-      paymentMethod: FundingPaymentMethod;
-      fiatAmount?: number;
-      fiatCurrency?: string;
-      paymentReference: string;
-      paymentDate?: string;
-      proofDocumentUrl?: string;
-      internalNotes?: string;
-    },
-    recordedByUserId: string,
-    proofUpload?: {
-      buffer: Buffer;
-      originalname: string;
-      mimetype: string;
-    },
-  ) {
+  async adminMintToCompany(userId: string, amount: number) {
+    // 1. Fetch company user + check they have a Hedera wallet
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -302,11 +133,6 @@ export class WalletService {
       },
     });
     if (!user) throw new NotFoundException('User not found');
-    if (user.role !== UserRole.COMPANY) {
-      throw new BadRequestException(
-        'Le crédit traçable Arena Coin est réservé aux comptes avec le rôle COMPANY.',
-      );
-    }
     if (!user.hederaAccountId) {
       throw new BadRequestException(
         'This user has not registered a Hedera wallet. Ask them to use PATCH /user/wallet first.',
@@ -320,82 +146,6 @@ export class WalletService {
       );
     }
 
-    let paymentDateParsed: Date | undefined;
-    if (trace.paymentDate) {
-      const d = new Date(trace.paymentDate);
-      if (Number.isNaN(d.getTime())) {
-        throw new BadRequestException('paymentDate invalide');
-      }
-      paymentDateParsed = d;
-    }
-
-    let proofOriginalFilename: string | undefined;
-    let proofContentType: string | undefined;
-    let proofEncryptedPath: string | undefined;
-    let proofSha256Hex: string | undefined;
-
-    if (proofUpload?.buffer?.length) {
-      if (!this.proofEncryption.isConfigured()) {
-        throw new BadRequestException(
-          'Upload de preuve impossible : configurez PROOF_ENCRYPTION_KEY (32 octets, hex ou base64) sur le serveur.',
-        );
-      }
-      try {
-        const safeName = path
-          .basename(proofUpload.originalname || 'document')
-          .replace(/[^\w.\- ()\[\]]+/g, '_')
-          .slice(0, 200);
-        const stored = await this.proofEncryption.encryptAndPersist({
-          plain: proofUpload.buffer,
-          originalFilename: safeName,
-        });
-        proofOriginalFilename = safeName;
-        proofContentType = proofUpload.mimetype || 'application/octet-stream';
-        proofEncryptedPath = stored.relativePath;
-        proofSha256Hex = stored.sha256Hex;
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.error(`Proof encryption failed: ${msg}`);
-        throw new InternalServerErrorException(
-          'Échec du chiffrement de la preuve — réessayez ou contactez le support.',
-        );
-      }
-    }
-
-    const funding = await this.prisma.arenaCoinFunding.create({
-      data: {
-        beneficiaryUserId: userId,
-        arenaCoinAmount: amount,
-        paymentMethod: trace.paymentMethod,
-        fiatAmount: trace.fiatAmount,
-        fiatCurrency: trace.fiatCurrency,
-        paymentReference: trace.paymentReference.trim(),
-        paymentDate: paymentDateParsed,
-        proofDocumentUrl: trace.proofDocumentUrl,
-        proofOriginalFilename,
-        proofContentType,
-        proofEncryptedPath,
-        proofSha256Hex,
-        internalNotes: trace.internalNotes,
-        recordedByUserId,
-        mintStatus: ArenaCoinFundingMintStatus.PENDING,
-      },
-    });
-
-    let proofHederaAnchorTxId: string | null = null;
-    if (proofSha256Hex) {
-      proofHederaAnchorTxId = await this.hederaProofAnchor.anchorFundingProof({
-        fundingId: funding.id,
-        sha256Hex: proofSha256Hex,
-      });
-      if (proofHederaAnchorTxId) {
-        await this.prisma.arenaCoinFunding.update({
-          where: { id: funding.id },
-          data: { proofHederaAnchorTxId },
-        });
-      }
-    }
-
     const { client, operatorId, operatorKey } = this.buildClient();
     const tokenId = this.arenaTokenId;
     const recipientId = AccountId.fromString(user.hederaAccountId);
@@ -406,6 +156,7 @@ export class WalletService {
     let errorNote: string | null = null;
 
     try {
+      // Mint new tokens into the treasury first
       const mintTx = await new TokenMintTransaction()
         .setTokenId(tokenId)
         .setAmount(atomicAmount)
@@ -415,6 +166,7 @@ export class WalletService {
       await mintSubmit.getReceipt(client);
       this.logger.log(`Minted ${amount} ARENA to treasury`);
 
+      // Transfer from treasury to the company's wallet
       const transferTx = await new TransferTransaction()
         .addTokenTransfer(tokenId, operatorId, -atomicAmount)
         .addTokenTransfer(tokenId, recipientId, atomicAmount)
@@ -442,7 +194,8 @@ export class WalletService {
         txStatus = TransactionStatus.FAILED;
         errorNote = msg;
         this.logger.error('[MINT] Transfer failed', msg);
-        const failLog = await this.logTransaction({
+        // Log the failure then throw
+        await this.logTransaction({
           senderAccountId: 'TREASURY',
           receiverAccountId: user.hederaAccountId,
           amount,
@@ -451,20 +204,12 @@ export class WalletService {
           errorNote,
           hederaTransactionId: hederaTxId ?? undefined,
         });
-        await this.prisma.arenaCoinFunding.update({
-          where: { id: funding.id },
-          data: {
-            mintStatus: ArenaCoinFundingMintStatus.FAILED,
-            transactionLogId: failLog.id,
-            hederaTransactionId: hederaTxId ?? undefined,
-            mintErrorNote: errorNote ?? undefined,
-          },
-        });
         throw new InternalServerErrorException(`Failed to mint coins: ${msg}`);
       }
     }
     client.close();
 
+    // 2. Update walletBalance in DB (our off-chain mirror)
     const isSuccess = txStatus === TransactionStatus.SUCCESS;
     if (isSuccess) {
       await this.prisma.user.update({
@@ -473,6 +218,7 @@ export class WalletService {
       });
     }
 
+    // 3. Log the transaction
     const log = await this.logTransaction({
       senderAccountId: 'TREASURY',
       receiverAccountId: user.hederaAccountId,
@@ -483,130 +229,80 @@ export class WalletService {
       hederaTransactionId: hederaTxId ?? undefined,
     });
 
-    const fundingMintStatus =
-      txStatus === TransactionStatus.SUCCESS
-        ? ArenaCoinFundingMintStatus.COMPLETED
-        : ArenaCoinFundingMintStatus.PENDING_ASSOCIATION;
-
-    await this.prisma.arenaCoinFunding.update({
-      where: { id: funding.id },
-      data: {
-        mintStatus: fundingMintStatus,
-        transactionLogId: log.id,
-        hederaTransactionId: hederaTxId ?? undefined,
-        mintErrorNote: errorNote ?? undefined,
-      },
-    });
-
     return {
       success: isSuccess,
-      fundingId: funding.id,
       userId,
       recipientAccountId: user.hederaAccountId,
       amount,
       newBalance: isSuccess ? user.walletBalance + amount : user.walletBalance,
       transactionLogId: log.id,
       hederaTransactionId: hederaTxId,
-      mintStatus: fundingMintStatus,
-      proofSha256Hex: proofSha256Hex ?? undefined,
-      proofHederaAnchorTxId: proofHederaAnchorTxId ?? undefined,
       ...(errorNote && { note: errorNote }),
     };
   }
 
-  /** Téléchargement admin : déchiffre la preuve stockée sur disque */
-  async getDecryptedProofForFunding(fundingId: string) {
-    const row = await this.prisma.arenaCoinFunding.findUnique({
-      where: { id: fundingId },
+  /** Admin: résoudre un destinataire par ID Hedera (aperçu avant mint). */
+  async getWalletRecipientPreviewForAdmin(hederaAccountId: string) {
+    const variants = hederaAccountIdLookupVariants(hederaAccountId);
+    const user = await this.prisma.user.findFirst({
+      where: { hederaAccountId: { in: variants } },
       select: {
-        proofEncryptedPath: true,
-        proofOriginalFilename: true,
-        proofContentType: true,
+        id: true,
+        firstName: true,
+        lastName: true,
+        hederaAccountId: true,
+        email: true,
       },
     });
-    if (!row?.proofEncryptedPath) {
+    if (!user) {
       throw new NotFoundException(
-        'Aucun fichier preuve chiffré pour cette entrée.',
+        'No user registered with this Hedera wallet ID',
       );
     }
-    const buffer = this.proofEncryption.decryptFromRelativePath(
-      row.proofEncryptedPath,
-    );
     return {
-      buffer,
-      filename: row.proofOriginalFilename ?? 'preuve',
-      contentType: row.proofContentType ?? 'application/octet-stream',
+      userId: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      hederaAccountId: user.hederaAccountId,
+      email: user.email,
     };
   }
 
-  /** Liste paginée des entrées fiat → Arena Coin (audit admin) */
-  async listFundingsForAdmin(params: {
-    page: number;
-    limit: number;
-    beneficiaryUserId?: string;
+  /**
+   * Mint admin vers un utilisateur identifié par Mongo `userId` ou par `hederaAccountId` enregistré.
+   * (App mobile admin — même logique que adminMintToCompany après résolution.)
+   */
+  async adminMintDirect(opts: {
+    amount: number;
+    userId?: string;
+    hederaAccountId?: string;
   }) {
-    const { page, limit, beneficiaryUserId } = params;
-    const skip = (page - 1) * limit;
-    const where = beneficiaryUserId
-      ? { beneficiaryUserId }
-      : {};
-
-    const [items, total] = await Promise.all([
-      this.prisma.arenaCoinFunding.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-        include: {
-          beneficiary: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-              role: true,
-              hederaAccountId: true,
-            },
-          },
-          recordedBy: {
-            select: {
-              id: true,
-              email: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-        },
-      }),
-      this.prisma.arenaCoinFunding.count({ where }),
-    ]);
-
-    return {
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit) || 1,
-      items,
-    };
-  }
-
-  /** Historique des crédits traçables pour l’entreprise connectée */
-  async listFundingsForBeneficiary(userId: string) {
-    return this.prisma.arenaCoinFunding.findMany({
-      where: { beneficiaryUserId: userId },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-      include: {
-        recordedBy: {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    });
+    const uid = opts.userId?.trim();
+    const hid = opts.hederaAccountId?.trim();
+    if ((!uid || uid.length === 0) && (!hid || hid.length === 0)) {
+      throw new BadRequestException(
+        'Provide exactly one of userId or hederaAccountId',
+      );
+    }
+    if (uid && hid) {
+      throw new BadRequestException(
+        'Provide only one of userId or hederaAccountId',
+      );
+    }
+    let resolvedUserId = uid;
+    if (!resolvedUserId && hid) {
+      const u = await this.prisma.user.findFirst({
+        where: { hederaAccountId: hid },
+        select: { id: true },
+      });
+      if (!u) {
+        throw new BadRequestException(
+          'No user has registered this Hedera account. They must save it via PATCH /user/wallet first.',
+        );
+      }
+      resolvedUserId = u.id;
+    }
+    return this.adminMintToCompany(resolvedUserId!, opts.amount);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -925,241 +621,349 @@ export class WalletService {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  //  ADMIN — Hedera Mirror Node (on-chain Arena Coin ledger)
-  // ─────────────────────────────────────────────────────────────────
+  async listAdminWalletFundings(opts: {
+    page: number;
+    limit: number;
+    beneficiaryUserId?: string;
+  }) {
+    const page = Math.max(1, opts.page);
+    const limit = Math.min(Math.max(opts.limit, 1), 100);
+    const skip = (page - 1) * limit;
+    const where = opts.beneficiaryUserId?.trim()
+      ? { beneficiaryUserId: opts.beneficiaryUserId.trim() }
+      : {};
 
-  async getMirrorArenaTransactionsForAdmin(params: {
-    limit?: number;
-    nextPath?: string;
-    cryptotransferOnly?: boolean;
-  }): Promise<AdminMirrorArenaTransactionsResult> {
-    const tokenId = this.config.get<string>('ARENA_COIN_TOKEN_ID')?.trim();
-    if (!tokenId) {
-      throw new InternalServerErrorException(
-        'ARENA_COIN_TOKEN_ID is not configured',
-      );
-    }
-    const treasury = this.config.get<string>('HEDERA_ACCOUNT_ID')?.trim();
-    if (!treasury) {
-      throw new InternalServerErrorException(
-        'HEDERA_ACCOUNT_ID is not configured',
-      );
-    }
-
-    const decimalsRaw = this.config.get<string>('ARENA_COIN_DECIMALS');
-    const decimals =
-      decimalsRaw != null && decimalsRaw !== ''
-        ? Number(decimalsRaw)
-        : 2;
-    if (!Number.isFinite(decimals) || decimals < 0 || decimals > 18) {
-      throw new InternalServerErrorException(
-        'ARENA_COIN_DECIMALS must be a number between 0 and 18',
-      );
-    }
-
-    const mirrorBase =
-      this.config.get<string>('HEDERA_MIRROR_BASE_URL')?.replace(/\/$/, '') ??
-      'https://testnet.mirrornode.hedera.com';
-
-    const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
-    const cryptotransferOnly = params.cryptotransferOnly === true;
-
-    let url: string;
-    if (params.nextPath?.trim()) {
-      const np = params.nextPath.trim();
-      if (!np.startsWith('/api/v1/transactions')) {
-        throw new BadRequestException(
-          'Invalid next cursor: must start with /api/v1/transactions',
-        );
-      }
-      url = `${mirrorBase}${np}`;
-    } else {
-      const q = new URLSearchParams({
-        'account.id': treasury,
-        order: 'desc',
-        limit: String(limit),
-      });
-      if (cryptotransferOnly) {
-        q.set('transactiontype', 'CRYPTOTRANSFER');
-      }
-      url = `${mirrorBase}/api/v1/transactions?${q.toString()}`;
-    }
-
-    let res: AxiosResponse<MirrorTransactionsResponse>;
-    try {
-      res = await axios.get<MirrorTransactionsResponse>(url, {
-        timeout: 30_000,
-        validateStatus: () => true,
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Mirror node request failed: ${msg}`);
-      throw new InternalServerErrorException(
-        'Failed to reach Hedera mirror node',
-      );
-    }
-
-    if (res.status === 429) {
-      const ra = res.headers['retry-after'];
-      const retryAfter = Array.isArray(ra) ? ra[0] : ra;
-      throw new HttpException(
-        {
-          message: 'Hedera mirror node rate limit (429). Retry later.',
-          retryAfter: retryAfter ?? undefined,
+    const [total, rows] = await Promise.all([
+      this.prismaFunding().walletAdminFunding.count({ where }),
+      this.prismaFunding().walletAdminFunding.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        include: {
+          beneficiary: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
         },
-        429,
-      );
-    }
-
-    if (res.status >= 400) {
-      const dataAny = res.data as unknown as {
-        _status?: { messages?: Array<{ message?: string }> };
-      };
-      const mirrorMsg =
-        dataAny?._status?.messages?.[0]?.message ?? `HTTP ${res.status}`;
-      this.logger.warn(`Mirror node error ${res.status}: ${mirrorMsg}`);
-      throw new InternalServerErrorException(
-        `Mirror node returned ${res.status}: ${mirrorMsg}`,
-      );
-    }
-
-    const rows = res.data.transactions ?? [];
-    const items: ArenaMirrorTransactionItem[] = [];
-    for (const row of rows) {
-      const item = this.mapMirrorRowToArenaItem(
-        row,
-        tokenId,
-        decimals,
-        cryptotransferOnly,
-      );
-      if (item) {
-        items.push(item);
-      }
-    }
+      }),
+    ]);
 
     return {
-      source: 'hedera-mirror',
-      strategy:
-        'Query: GET /api/v1/transactions?account.id={HEDERA_ACCOUNT_ID}&order=desc&limit=… ' +
-        '(optional transactiontype=CRYPTOTRANSFER). ' +
-        'The mirror API does not accept token.id on this route; responses are filtered server-side ' +
-        'to rows where token_transfers includes ARENA_COIN_TOKEN_ID. ' +
-        'This matches treasury-centric Arena Coin flows (mint, escrow, rewards, refunds).',
-      mirrorBaseUrl: mirrorBase,
-      treasuryAccountId: treasury,
-      tokenId,
-      decimals,
-      transactions: items,
-      links: {
-        next: res.data.links?.next ?? null,
-      },
+      page,
+      limit,
+      total,
+      items: rows.map((r) => ({
+        id: r.id,
+        arenaCoinAmount: r.arenaCoinAmount,
+        paymentReference: r.paymentReference,
+        paymentMethod: r.paymentMethod,
+        fiatAmount: r.fiatAmount,
+        fiatCurrency: r.fiatCurrency,
+        paymentDate: r.paymentDate?.toISOString() ?? null,
+        internalNotes: r.internalNotes,
+        proofDocumentUrl: r.proofDocumentUrl,
+        proofHederaAnchorTxId: r.proofHederaAnchorTxId,
+        proofSha256Hex: r.proofSha256Hex,
+        proofEncryptedPath: r.proofEncryptedPath ?? '',
+        proofOriginalFilename: r.proofOriginalFilename,
+        hederaMintTransactionId: r.hederaMintTransactionId,
+        createdAt: r.createdAt.toISOString(),
+        beneficiary: r.beneficiary
+          ? {
+              id: r.beneficiary.id,
+              firstName: r.beneficiary.firstName,
+              lastName: r.beneficiary.lastName,
+              email: r.beneficiary.email,
+            }
+          : null,
+      })),
     };
   }
 
-  private mapMirrorRowToArenaItem(
-    row: MirrorTransactionRow,
-    tokenId: string,
-    decimals: number,
-    cryptotransferOnly: boolean,
-  ): ArenaMirrorTransactionItem | null {
-    if (cryptotransferOnly && row.name && row.name !== 'CRYPTOTRANSFER') {
-      return null;
+  async getFundingProofFilePath(fundingId: string): Promise<{
+    stream: ReturnType<typeof createReadStream>;
+    filename: string;
+    mime: string;
+  }> {
+    const row = await this.prismaFunding().walletAdminFunding.findUnique({
+      where: { id: fundingId },
+      select: {
+        proofEncryptedPath: true,
+        proofOriginalFilename: true,
+      },
+    });
+    if (!row?.proofEncryptedPath?.trim()) {
+      throw new NotFoundException('No proof file for this funding entry');
     }
-    const forToken =
-      row.token_transfers?.filter((t) => t.token_id === tokenId) ?? [];
-    if (forToken.length === 0) {
-      return null;
+    const rel = row.proofEncryptedPath.trim().replace(/\\/g, '/');
+    const abs = path.isAbsolute(rel) ? rel : path.join(process.cwd(), rel);
+    if (!existsSync(abs)) {
+      throw new NotFoundException('Proof file missing on disk');
     }
+    const ext = path.extname(row.proofOriginalFilename ?? '').toLowerCase();
+    const mime =
+      ext === '.pdf'
+        ? 'application/pdf'
+        : ext === '.png'
+          ? 'image/png'
+          : ext === '.jpg' || ext === '.jpeg'
+            ? 'image/jpeg'
+            : 'application/octet-stream';
+    const filename =
+      row.proofOriginalFilename?.trim() || `proof-${fundingId}${ext || '.bin'}`;
+    return {
+      stream: createReadStream(abs),
+      filename,
+      mime,
+    };
+  }
 
-    const { legs, rawTokenLegs } = this.buildArenaTransferLegs(
-      forToken,
-      decimals,
+  /**
+   * Mint + enregistrement audit (paiement / preuve fichier) pour l’app admin mobile.
+   */
+  async adminMintWithTrace(
+    params: {
+      userId: string;
+      amount: number;
+      paymentMethod: string;
+      paymentReference: string;
+      fiatAmount?: number;
+      fiatCurrency?: string;
+      paymentDate?: string;
+      internalNotes?: string;
+      proofDocumentUrl?: string;
+    },
+    proofFile?: Express.Multer.File,
+  ) {
+    const mintResult = await this.adminMintToCompany(
+      params.userId,
+      params.amount,
     );
 
-    return {
-      transactionId: row.transaction_id ?? null,
-      consensusTimestamp: row.consensus_timestamp,
-      consensusAtIso: this.consensusTimestampToIso(row.consensus_timestamp),
-      type: row.name ?? null,
-      result: row.result ?? null,
-      transfers: legs,
-      ...(rawTokenLegs ? { rawTokenLegs } : {}),
-    };
-  }
+    let paymentDateParsed: Date | undefined;
+    if (params.paymentDate) {
+      const d = new Date(params.paymentDate);
+      if (!Number.isNaN(d.getTime())) paymentDateParsed = d;
+    }
 
-  private buildArenaTransferLegs(
-    rows: MirrorTokenTransferRow[],
-    decimals: number,
-  ): {
-    legs: ArenaMirrorTransactionItem['transfers'];
-    rawTokenLegs?: ArenaMirrorTransactionItem['rawTokenLegs'];
-  } {
-    const amountRawStr = (v: string | number) => String(v ?? '0').trim();
-    const isDebit = (amount: string | number) =>
-      amountRawStr(amount).startsWith('-');
-    const absRaw = (amount: string | number) => {
-      const s = amountRawStr(amount);
-      return isDebit(amount) ? s.slice(1) : s;
-    };
+    let proofSha256Hex: string | undefined;
+    let proofOriginalFilename: string | undefined;
+    if (proofFile?.buffer?.length) {
+      proofSha256Hex = createHash('sha256')
+        .update(proofFile.buffer)
+        .digest('hex');
+      proofOriginalFilename =
+        proofFile.originalname?.replace(/[^\w.\-()+@ ]/g, '_') || 'proof.bin';
+    }
 
-    const legs: ArenaMirrorTransactionItem['transfers'] = [];
-    const debits = rows.filter((r) => isDebit(r.amount));
-    const credits = rows.filter((r) => {
-      const s = amountRawStr(r.amount);
-      return !isDebit(r.amount) && s !== '0' && Number(s) !== 0;
+    const hederaTx =
+      mintResult.hederaTransactionId != null
+        ? String(mintResult.hederaTransactionId)
+        : undefined;
+
+    const created = await this.prismaFunding().walletAdminFunding.create({
+      data: {
+        beneficiaryUserId: params.userId,
+        arenaCoinAmount: params.amount,
+        paymentMethod: params.paymentMethod,
+        paymentReference: params.paymentReference,
+        fiatAmount: params.fiatAmount,
+        fiatCurrency: params.fiatCurrency,
+        paymentDate: paymentDateParsed,
+        internalNotes: params.internalNotes,
+        proofDocumentUrl: params.proofDocumentUrl,
+        proofSha256Hex,
+        proofOriginalFilename,
+        hederaMintTransactionId: hederaTx,
+      },
     });
-    const usedCreditIdx = new Set<number>();
 
-    for (const d of debits) {
-      const want = absRaw(d.amount);
-      const idx = credits.findIndex(
-        (c, i) => !usedCreditIdx.has(i) && absRaw(c.amount) === want,
+    if (proofFile?.buffer?.length) {
+      const dir = path.join(process.cwd(), 'uploads', 'wallet-funding');
+      await mkdir(dir, { recursive: true });
+      const safeBase = proofOriginalFilename ?? 'proof.bin';
+      const safeName = `${created.id}_${safeBase}`;
+      const abs = path.join(dir, safeName);
+      await writeFile(abs, proofFile.buffer);
+      const rel = path.join('uploads', 'wallet-funding', safeName).replace(/\\/g, '/');
+      await this.prismaFunding().walletAdminFunding.update({
+        where: { id: created.id },
+        data: {
+          proofEncryptedPath: rel,
+          proofSha256Hex: proofSha256Hex!,
+        },
+      });
+    }
+
+    return {
+      ...mintResult,
+      fundingAuditId: created.id,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  //  6. ADMIN — Hedera Mirror (on-chain token movements for treasury)
+  // ─────────────────────────────────────────────────────────────────
+
+  async getAdminMirrorTransactions(opts: {
+    limit: number;
+    next?: string;
+    cryptotransferOnly: boolean;
+  }) {
+    const mirrorBase = (
+      this.config.get<string>('HEDERA_MIRROR_BASE_URL') ?? 'https://testnet.mirrornode.hedera.com'
+    ).replace(/\/$/, '');
+    const treasury = this.config.get<string>('HEDERA_ACCOUNT_ID');
+    const tokenId = this.config.get<string>('ARENA_COIN_TOKEN_ID');
+    const decimals = 2;
+
+    const empty = () => ({
+      source: 'hedera-mirror',
+      strategy: 'treasury-account',
+      mirrorBaseUrl: mirrorBase,
+      treasuryAccountId: treasury ?? '',
+      tokenId: tokenId ?? '',
+      decimals,
+      transactions: [],
+      links: {} as { next?: string },
+    });
+
+    if (!treasury || !tokenId) {
+      this.logger.warn(
+        '[MIRROR] HEDERA_ACCOUNT_ID or ARENA_COIN_TOKEN_ID missing — returning empty page',
       );
-      if (idx >= 0) {
-        usedCreditIdx.add(idx);
-        legs.push({
-          sender: d.account,
-          receiver: credits[idx].account,
-          amount: this.rawAmountToHuman(want, decimals),
-          amountRaw: want,
-        });
+      return empty();
+    }
+
+    const tokenNorm = tokenId.trim().toLowerCase();
+    let url: string;
+    if (opts.next?.trim()) {
+      const n = opts.next.trim();
+      url =
+        n.startsWith('http://') || n.startsWith('https://')
+          ? n
+          : `${mirrorBase}${n.startsWith('/') ? '' : '/'}${n}`;
+    } else {
+      const qs = new URLSearchParams({
+        'account.id': treasury,
+        limit: String(Math.min(Math.max(opts.limit, 1), 100)),
+      });
+      if (opts.cryptotransferOnly) {
+        qs.set('transactiontype', 'CRYPTOTRANSFER');
       }
+      url = `${mirrorBase}/api/v1/transactions?${qs.toString()}`;
     }
 
-    let rawTokenLegs: ArenaMirrorTransactionItem['rawTokenLegs'];
-    if (legs.length === 0 && rows.length > 0) {
-      rawTokenLegs = rows.map((r) => ({
-        account: r.account,
-        amount: this.rawAmountToHuman(r.amount, decimals),
-        amountRaw: amountRawStr(r.amount),
-      }));
-    }
+    try {
+      const { data, status } = await axios.get<MirrorTransactionsResponse>(
+        url,
+        {
+          timeout: 30_000,
+          validateStatus: () => true,
+        },
+      );
 
-    return { legs, rawTokenLegs };
+      if (status === 429) {
+        throw new HttpException(
+          'Hedera Mirror rate limit (429)',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      if (status < 200 || status >= 300) {
+        this.logger.warn(`[MIRROR] HTTP ${status} for ${url}`);
+        throw new InternalServerErrorException(
+          `Mirror request failed with status ${status}`,
+        );
+      }
+
+      const rawTxs = data.transactions ?? [];
+      const transactions = rawTxs
+        .map((tx) => this.mapMirrorTransaction(tx, tokenNorm, decimals))
+        .filter((t) => t.rawTokenLegs.length > 0 || t.transfers.length > 0);
+
+      const nextHref = data._links?.next?.href;
+      const links =
+        nextHref && String(nextHref).trim()
+          ? { next: String(nextHref).trim() }
+          : {};
+
+      return {
+        source: 'hedera-mirror',
+        strategy: 'treasury-account',
+        mirrorBaseUrl: mirrorBase,
+        treasuryAccountId: treasury,
+        tokenId,
+        decimals,
+        transactions,
+        links,
+      };
+    } catch (err: unknown) {
+      if (err instanceof HttpException) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`[MIRROR] ${msg}`);
+      throw new InternalServerErrorException(
+        `Failed to fetch Hedera mirror transactions: ${msg}`,
+      );
+    }
   }
 
-  private rawAmountToHuman(
-    amountRawSigned: string | number,
+  private normalizeTokenId(id: string): string {
+    return id.trim().toLowerCase();
+  }
+
+  private mapMirrorTransaction(
+    tx: MirrorTransaction,
+    arenaTokenNorm: string,
     decimals: number,
-  ): number {
-    const s = String(amountRawSigned ?? '0').trim();
-    const neg = s.startsWith('-');
-    const abs = neg ? s.slice(1) : s;
-    const n = Number(abs);
-    if (!Number.isFinite(n)) {
-      return 0;
-    }
-    const human = n / 10 ** decimals;
-    return neg ? -human : human;
-  }
+  ) {
+    const consensusTimestamp = tx.consensus_timestamp ?? '';
+    const tokenTransfers = (tx.token_transfers ?? []).filter(
+      (t) =>
+        t.token_id &&
+        this.normalizeTokenId(t.token_id) === arenaTokenNorm,
+    );
 
-  private consensusTimestampToIso(ts: string): string {
-    const [secPart, nanoPart = '0'] = ts.split('.');
-    const sec = Number(secPart);
-    const nano = Number((nanoPart + '000000000').slice(0, 9));
-    const ms = sec * 1000 + Math.floor(nano / 1_000_000);
-    return new Date(ms).toISOString();
+    const rawTokenLegs = tokenTransfers.map((t) => {
+      const raw = BigInt(String(t.amount));
+      const human = Number(raw < 0n ? -raw : raw) / 10 ** decimals;
+      return {
+        account: t.account ?? '',
+        amount: human,
+        amountRaw: String(t.amount),
+      };
+    });
+
+    const senders = tokenTransfers.filter((t) => BigInt(String(t.amount)) < 0n);
+    const receivers = tokenTransfers.filter(
+      (t) => BigInt(String(t.amount)) > 0n,
+    );
+    const transfers: {
+      sender: string;
+      receiver: string;
+      amount: number;
+      amountRaw: string;
+    }[] = [];
+    const n = Math.min(senders.length, receivers.length);
+    for (let i = 0; i < n; i++) {
+      const rawAmt = BigInt(String(senders[i].amount));
+      const absRaw = rawAmt < 0n ? -rawAmt : rawAmt;
+      transfers.push({
+        sender: senders[i].account ?? '',
+        receiver: receivers[i].account ?? '',
+        amount: Number(absRaw) / 10 ** decimals,
+        amountRaw: absRaw.toString(),
+      });
+    }
+
+    return {
+      transactionId: tx.transaction_id ?? null,
+      consensusTimestamp,
+      consensusAtIso: consensusTimestampToIso(consensusTimestamp),
+      type: tx.name ?? null,
+      result: tx.result ?? null,
+      transfers,
+      rawTokenLegs,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────

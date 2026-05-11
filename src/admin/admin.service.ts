@@ -26,27 +26,15 @@ export class AdminService {
 
   async getCompanyRequests(status?: RequestStatus) {
     const where = status ? { status } : {};
-    // Ne pas utiliser `include: { user }` seul : en Mongo, des demandes orphelines
-    // (userId sans User, ex. compte supprimé hors Prisma) provoquent
-    // "Inconsistent query result: Field user is required... got null".
-    const rows = await this.prisma.companyRoleRequest.findMany({
+    return this.prisma.companyRoleRequest.findMany({
       where,
+      include: {
+        user: {
+          select: { id: true, email: true, firstName: true, lastName: true },
+        },
+      },
       orderBy: { createdAt: 'desc' },
     });
-    if (rows.length === 0) return [];
-
-    const userIds = [...new Set(rows.map((r) => r.userId))];
-    const users = await this.prisma.user.findMany({
-      where: { id: { in: userIds } },
-      select: { id: true, email: true, firstName: true, lastName: true },
-    });
-    const byId = new Map(users.map((u) => [u.id, u] as const));
-    return rows
-      .filter((r) => byId.has(r.userId))
-      .map((r) => ({
-        ...r,
-        user: byId.get(r.userId)!,
-      }));
   }
 
   async reviewCompanyRequest(
@@ -55,15 +43,12 @@ export class AdminService {
   ) {
     const request = await this.prisma.companyRoleRequest.findUnique({
       where: { id: requestId },
+      include: { user: true },
     });
     if (!request) throw new NotFoundException('Company request not found');
-    const user = await this.prisma.user.findUnique({
-      where: { id: request.userId },
-      select: { id: true },
-    });
-    if (!user) {
-      throw new BadRequestException(
-        'Utilisateur introuvable pour cette demande (données incohérentes).',
+    if (!request.user) {
+      throw new NotFoundException(
+        'Company request owner no longer exists; cannot review',
       );
     }
     if (request.status !== RequestStatus.PENDING) {
@@ -255,5 +240,104 @@ export class AdminService {
             : 'Échec du déclenchement du workflow',
       };
     }
+  }
+
+  async listCertificates(opts: { limit?: number; offset?: number }) {
+    const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100);
+    const offset = Math.max(opts.offset ?? 0, 0);
+
+    const toGateway = (uri: string | null | undefined): string | null => {
+      if (!uri) return null;
+      if (uri.startsWith('ipfs://')) {
+        return `https://gateway.pinata.cloud/ipfs/${uri.slice(7)}`;
+      }
+      return uri;
+    };
+
+    const [total, rows] = await Promise.all([
+      this.prisma.certificate.count(),
+      this.prisma.certificate.findMany({
+        orderBy: { mintedAt: 'desc' },
+        take: limit,
+        skip: offset,
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      total,
+      limit,
+      offset,
+      items: rows.map((r) => ({
+        id: r.id,
+        userId: r.userId,
+        hackathonName: r.hackathonName,
+        tokenId: r.tokenId,
+        serial: r.serial,
+        imageIpfsUrl: r.imageIpfsUrl,
+        imagePreviewUrl: toGateway(r.imageIpfsUrl),
+        metadataUrl: r.metadataUrl,
+        metadataPreviewUrl: toGateway(r.metadataUrl),
+        transferredToWallet: r.transferredToWallet,
+        recipientAccountId: r.recipientAccountId,
+        mintedAt: r.mintedAt.toISOString(),
+        hashscanNftUrl: `https://hashscan.io/testnet/token/${encodeURIComponent(r.tokenId)}/nft/${r.serial}`,
+        user: r.user
+          ? {
+              id: r.user.id,
+              email: r.user.email,
+              firstName: r.user.firstName,
+              lastName: r.user.lastName,
+            }
+          : null,
+      })),
+    };
+  }
+
+  /**
+   * Résout un utilisateur enregistré à partir de son ID de compte Hedera (aperçu avant mint admin).
+   */
+  async resolveRecipientByHedera(hederaAccountId: string) {
+    const h = hederaAccountId?.trim();
+    if (!h) {
+      throw new BadRequestException('Query parameter hederaAccountId is required');
+    }
+    const user = await this.prisma.user.findFirst({
+      where: { hederaAccountId: h },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        hederaAccountId: true,
+      },
+    });
+    if (!user) {
+      return {
+        found: false,
+        hederaAccountId: h,
+        firstName: '',
+        lastName: '',
+        email: null as string | null,
+        userId: null as string | null,
+      };
+    }
+    return {
+      found: true,
+      userId: user.id,
+      hederaAccountId: user.hederaAccountId,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+    };
   }
 }

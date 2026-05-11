@@ -137,6 +137,7 @@ model User {
   notifications        Notification[]
   companyRoleRequests  CompanyRoleRequest[]
   certificates         Certificate[]
+  walletAdminFundings  WalletAdminFunding[]
 
   // ───── Equipe Relations ─────
   equipeMembers        EquipeMember[]
@@ -168,7 +169,8 @@ enum RequestStatus {
 model CompanyRoleRequest {
   id          String        @id @default(auto()) @map("_id") @db.ObjectId
   userId      String        @db.ObjectId
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Optionnel côté Prisma : si l’utilisateur a été supprimé en base, l’include ne plante pas (MongoDB sans FK stricte).
+  user        User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
   companyName String
   description String?
   status      RequestStatus @default(PENDING)
@@ -177,6 +179,35 @@ model CompanyRoleRequest {
 
   @@index([userId])
   @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ADMIN WALLET FUNDING (fiat / paiement → Arena Coin + preuve)
+// ─────────────────────────────────────────────────────────────────
+
+model WalletAdminFunding {
+  id                      String    @id @default(auto()) @map("_id") @db.ObjectId
+  beneficiaryUserId       String    @db.ObjectId
+  beneficiary             User?     @relation(fields: [beneficiaryUserId], references: [id])
+  arenaCoinAmount         Float
+  paymentMethod           String
+  paymentReference        String
+  fiatAmount              Float?
+  fiatCurrency            String?
+  paymentDate             DateTime?
+  internalNotes           String?
+  proofDocumentUrl        String?
+  proofSha256Hex          String?
+  /// Chemin relatif sous `uploads/` (fichier justificatif)
+  proofEncryptedPath      String?
+  proofOriginalFilename   String?
+  proofHederaAnchorTxId     String?
+  hederaMintTransactionId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([beneficiaryUserId])
+  @@index([createdAt])
 }
 
 

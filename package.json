@@ -6,6 +6,7 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
+    "postinstall": "prisma generate",
     "build": "nest build",
     "start:fix": "node --no-deprecation dist/main",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",

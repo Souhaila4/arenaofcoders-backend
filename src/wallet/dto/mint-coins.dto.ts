@@ -1,33 +1,85 @@
-import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsPositive,
+  IsString,
+  Min,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+
+function toPositiveNumber(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const n = parseFloat(String(value ?? '').replace(',', '.'));
+  if (!Number.isFinite(n)) return NaN;
+  return n;
+}
+
+function toOptionalNonNegNumber(value: unknown): number | undefined {
+  if (value === '' || value === undefined || value === null) return undefined;
+  const n = toPositiveNumber(value);
+  if (!Number.isFinite(n)) return undefined;
+  return n;
+}
 
 export class MintCoinsDto {
-  @ApiPropertyOptional({
+  @ApiProperty({
     example: 'user_id_here',
     description:
-      'MongoDB user id of the recipient (use this or hederaAccountId, not both)',
+      'ID (MongoDB ObjectId) of the company user to receive the coins',
   })
-  @IsOptional()
   @IsString()
-  userId?: string;
-
-  @ApiPropertyOptional({
-    example: '0.0.123456',
-    description:
-      'Hedera account ID already registered on the user profile (use this or userId, not both)',
-  })
-  @IsOptional()
-  @IsString()
-  hederaAccountId?: string;
+  @IsNotEmpty()
+  userId: string;
 
   @ApiProperty({
     example: 500,
     description:
-      'Arena Coins to mint and transfer. Recipient must have hederaAccountId on file.',
+      'Number of Arena Coins to mint into the company wallet. The company must have a hederaAccountId registered.',
   })
-  @Type(() => Number)
-  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Transform(({ value }) => toPositiveNumber(value))
+  @IsNumber()
   @IsPositive()
   amount: number;
+
+  @ApiPropertyOptional({
+    description:
+      'When set with paymentReference (or proof file), mint is logged for audit.',
+  })
+  @IsOptional()
+  @IsString()
+  paymentMethod?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  paymentReference?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(({ value }) => toOptionalNonNegNumber(value))
+  @IsNumber()
+  @Min(0)
+  fiatAmount?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  fiatCurrency?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  paymentDate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  internalNotes?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  proofDocumentUrl?: string;
 }

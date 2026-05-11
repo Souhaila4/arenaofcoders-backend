@@ -1,8 +1,8 @@
-# Certificate Template
+# Certificate Template (optional)
 
-Place the file `arena_Certificate.jpg` in this folder.
+By default, certificates are **generated entirely in code** (SVG → JPEG) with a navy & gold layout—**no file is required**.
 
-This is the JPG template used by the certificate generation service to overlay the participant's name, hackathon name, and date using Sharp + SVG.
+If you add `arena_Certificate.jpg` here, the service will **overlay** name, hackathon, and date on your image instead.
 
 ## Requirements
 - File name: `arena_Certificate.jpg`

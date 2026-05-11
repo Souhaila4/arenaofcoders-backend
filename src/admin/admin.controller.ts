@@ -70,6 +70,44 @@ export class AdminController {
     return this.adminService.getCompanyRequests(status as any);
   }
 
+  @Get('certificates')
+  @ApiOperation({
+    summary: 'Liste les certificats NFT émis (Admin)',
+    description:
+      'Historique des certificats générés (utilisateur, hackathon, IPFS, Hedera). Pagination limit/offset.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'offset', required: false, type: Number })
+  @ApiResponse({ status: 200 })
+  async listCertificates(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.adminService.listCertificates({
+      limit: limit ? parseInt(limit, 10) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    });
+  }
+
+  @Get('recipients/by-hedera')
+  @ApiOperation({
+    summary: 'Résoudre un utilisateur par ID de compte Hedera (admin)',
+    description:
+      'Retourne prénom/nom/email si un utilisateur a enregistré cet ID via PATCH /user/wallet. Sinon found=false et noms vides.',
+  })
+  @ApiQuery({
+    name: 'hederaAccountId',
+    required: true,
+    example: '0.0.7359554',
+  })
+  @ApiResponse({ status: 200 })
+  @ApiResponse({ status: 400, description: 'hederaAccountId manquant' })
+  async getRecipientByHedera(
+    @Query('hederaAccountId') hederaAccountId?: string,
+  ) {
+    return this.adminService.resolveRecipientByHedera(hederaAccountId ?? '');
+  }
+
   @Patch('company-requests/:id/review')
   @ApiOperation({
     summary: 'Accepter ou refuser une demande de rôle entreprise',

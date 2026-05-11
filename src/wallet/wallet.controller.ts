@@ -8,31 +8,26 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
-  BadRequestException,
-  Res,
   UseInterceptors,
   UploadedFile,
+  StreamableFile,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import type { Response } from 'express';
+import type { Express } from 'express-serve-static-core';
 import {
   ApiTags,
   ApiBearerAuth,
   ApiOperation,
   ApiResponse,
   ApiParam,
-  ApiConsumes,
-  ApiBody,
-  ApiQuery,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { WalletService } from './wallet.service';
-import { AdminMintWithFundingDto } from './dto/admin-mint-with-funding.dto';
-import { ListFundingQueryDto } from './dto/list-funding-query.dto';
 import { MintCoinsDto } from './dto/mint-coins.dto';
-import { FundingPaymentMethod } from '@prisma/client';
+import { MintDirectDto } from './dto/mint-direct.dto';
 
 @ApiTags('wallet')
 @ApiBearerAuth('access-token')
@@ -68,236 +63,154 @@ export class WalletController {
     return this.walletService.getWalletInfo(userId);
   }
 
-  @Post('admin/mint-direct')
-  @UseGuards(AdminGuard)
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Admin: mint ARENA + transfert trésor → wallet Hedera (JSON userId ou hederaAccountId)',
-    description:
-      'Pour l’app mobile « Envoyer ARENA ». Le POST /wallet/admin/mint reste réservé au multipart (traçabilité entreprise).',
-  })
-  @ApiResponse({ status: 201 })
-  async mintDirectJson(@Body() dto: MintCoinsDto) {
-    return this.walletService.adminMintArenaCoinsDirect({
-      userId: dto.userId,
-      hederaAccountId: dto.hederaAccountId,
-      amount: dto.amount,
-    });
-  }
-
   // ─────────────────────────────────────────────────────────────────
-  //  ADMIN: Mint + traçabilité (multipart : preuve fichier chiffrée)
+  //  ADMIN: Mint coins into a company's wallet
   // ─────────────────────────────────────────────────────────────────
 
   @Post('admin/mint')
   @UseGuards(AdminGuard)
   @UseInterceptors(
-    FileInterceptor('proof', { limits: { fileSize: 10 * 1024 * 1024 } }),
+    FileInterceptor('proof', {
+      limits: { fileSize: 25 * 1024 * 1024 },
+    }),
   )
-  @ApiConsumes('multipart/form-data')
-  @ApiBody({
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Admin: Mint Arena Coins to a company wallet',
+    description:
+      "JSON body or multipart/form-data (same fields + optional file field `proof`). " +
+      'If paymentReference is set (or a proof file is uploaded), an audit row is stored. ' +
+      'The company must have already registered their hederaAccountId via PATCH /user/wallet.',
+  })
+  @ApiResponse({
+    status: 201,
     schema: {
-      type: 'object',
-      required: ['userId', 'amount', 'paymentMethod', 'paymentReference'],
-      properties: {
-        userId: { type: 'string' },
-        amount: { type: 'string', example: '500' },
-        paymentMethod: { type: 'string', enum: Object.values(FundingPaymentMethod) },
-        paymentReference: { type: 'string' },
-        fiatAmount: { type: 'string' },
-        fiatCurrency: { type: 'string' },
-        paymentDate: { type: 'string', format: 'date-time' },
-        internalNotes: { type: 'string' },
-        proofDocumentUrl: { type: 'string' },
-        proof: { type: 'string', format: 'binary', description: 'Justificatif (PDF, image…)' },
+      example: {
+        success: true,
+        userId: '...',
+        recipientAccountId: '0.0.123456',
+        amount: 500,
+        newBalance: 1000,
+        transactionLogId: '...',
+        hederaTransactionId: '0.0.7359554@1743295200.123456789',
+        fundingAuditId: '...',
       },
     },
   })
+  @ApiResponse({
+    status: 400,
+    description: 'Company has no Hedera wallet registered or bad request',
+  })
+  async mintCoins(
+    @UploadedFile() proof: Express.Multer.File | undefined,
+    @Body() dto: MintCoinsDto,
+  ) {
+    const ref = dto.paymentReference?.trim() ?? '';
+    if (ref.length > 0 || proof != null) {
+      if (ref.length === 0) {
+        throw new BadRequestException(
+          'paymentReference is required when uploading a proof file',
+        );
+      }
+      return this.walletService.adminMintWithTrace(
+        {
+          userId: dto.userId.trim(),
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod?.trim() || 'BANK_TRANSFER',
+          paymentReference: ref,
+          fiatAmount: dto.fiatAmount,
+          fiatCurrency: dto.fiatCurrency?.trim() || undefined,
+          paymentDate: dto.paymentDate?.trim() || undefined,
+          internalNotes: dto.internalNotes?.trim() || undefined,
+          proofDocumentUrl: dto.proofDocumentUrl?.trim() || undefined,
+        },
+        proof,
+      );
+    }
+    return this.walletService.adminMintToCompany(dto.userId, dto.amount);
+  }
+
+  @Post('admin/mint-direct')
+  @UseGuards(AdminGuard)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
-    summary: 'Admin: mint + formulaire traçabilité + preuve (fichier chiffrée)',
+    summary: 'Admin: mint ARENA by Mongo user id or Hedera account id',
     description:
-      'Champs texte + fichier optionnel `proof`. Fichier stocké chiffré (AES-256-GCM), hash ancré sur Hedera (topic HCS si configuré).',
+      'Same on-chain behaviour as POST /wallet/admin/mint (treasury → recipient wallet). ' +
+      'Either `userId` (Mongo) or `hederaAccountId` (must match a user’s PATCH /user/wallet value).',
   })
   @ApiResponse({ status: 201 })
-  async mintWithMultipart(
-    @UploadedFile() proof: Express.Multer.File | undefined,
-    @Body() body: Record<string, string>,
-    @CurrentUser('id') adminUserId: string,
-  ) {
-    const userId = body.userId?.trim();
-    const amount = parseFloat(String(body.amount ?? ''));
-    if (!userId || Number.isNaN(amount) || amount <= 0) {
-      throw new BadRequestException('userId et amount (> 0) requis.');
-    }
-    const pm = body.paymentMethod?.trim();
-    if (!pm || !Object.values(FundingPaymentMethod).includes(pm as FundingPaymentMethod)) {
-      throw new BadRequestException('paymentMethod invalide.');
-    }
-    const ref = body.paymentReference?.trim();
-    if (!ref) {
-      throw new BadRequestException('paymentReference requis.');
-    }
-    let fiatAmount: number | undefined;
-    if (body.fiatAmount != null && String(body.fiatAmount).trim() !== '') {
-      const f = parseFloat(String(body.fiatAmount));
-      if (Number.isNaN(f) || f < 0) {
-        throw new BadRequestException('fiatAmount invalide.');
-      }
-      fiatAmount = f;
-    }
-    const fiatCurrency =
-      body.fiatCurrency?.trim().length === 3
-        ? body.fiatCurrency.trim().toUpperCase()
-        : body.fiatCurrency?.trim() || undefined;
-
-    const trace = {
-      paymentMethod: pm as FundingPaymentMethod,
-      fiatAmount,
-      fiatCurrency,
-      paymentReference: ref,
-      paymentDate: body.paymentDate?.trim() || undefined,
-      proofDocumentUrl: body.proofDocumentUrl?.trim() || undefined,
-      internalNotes: body.internalNotes?.trim() || undefined,
-    };
-
-    const proofUpload =
-      proof?.buffer?.length && proof.buffer.length > 0
-        ? {
-            buffer: proof.buffer,
-            originalname: proof.originalname ?? 'document',
-            mimetype: proof.mimetype ?? 'application/octet-stream',
-          }
-        : undefined;
-
-    return this.walletService.adminMintToCompany(
-      userId,
-      amount,
-      trace,
-      adminUserId,
-      proofUpload,
-    );
+  async adminMintDirect(@Body() dto: MintDirectDto) {
+    return this.walletService.adminMintDirect({
+      amount: dto.amount,
+      userId: dto.userId,
+      hederaAccountId: dto.hederaAccountId,
+    });
   }
 
-  /** Mint sans fichier (scripts / clients JSON uniquement) */
-  @Post('admin/mint-json')
+  @Get('admin/funding/:fundingId/proof-file')
   @UseGuards(AdminGuard)
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Admin: mint traçabilité (JSON, sans upload fichier)' })
-  async mintJson(
-    @Body() dto: AdminMintWithFundingDto,
-    @CurrentUser('id') adminUserId: string,
-  ) {
-    return this.walletService.adminMintToCompany(
-      dto.userId,
-      dto.amount,
-      dto.funding,
-      adminUserId,
-    );
-  }
-
-  @Get('admin/funding/:id/proof-file')
-  @UseGuards(AdminGuard)
-  @ApiOperation({
-    summary: 'Admin: télécharger la preuve (déchiffrement serveur)',
-  })
-  @ApiParam({ name: 'id', description: 'ID ArenaCoinFunding' })
+  @ApiOperation({ summary: 'Admin: Download funding proof attachment' })
+  @ApiParam({ name: 'fundingId', description: 'WalletAdminFunding id' })
   async downloadFundingProof(
-    @Param('id') id: string,
-    @Res() res: Response,
-  ) {
-    const { buffer, filename, contentType } =
-      await this.walletService.getDecryptedProofForFunding(id);
-    res.setHeader('Content-Type', contentType);
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(filename)}"`,
-    );
-    res.send(buffer);
+    @Param('fundingId') fundingId: string,
+  ): Promise<StreamableFile> {
+    const { stream, filename, mime } =
+      await this.walletService.getFundingProofFilePath(fundingId);
+    return new StreamableFile(stream, {
+      type: mime,
+      disposition: `attachment; filename="${encodeURIComponent(filename)}"`,
+    });
   }
 
   @Get('admin/funding')
   @UseGuards(AdminGuard)
   @ApiOperation({
-    summary: 'Admin: audit des entrées fiat → Arena Coin',
-    description:
-      'Liste paginée des formulaires de traçabilité (qui a payé comment, combien, référence, lien preuve, statut mint).',
+    summary: 'Admin: Paginated audit of company funding / mint traces',
   })
-  @ApiResponse({ status: 200 })
-  async listFundingsForAdmin(@Query() query: ListFundingQueryDto) {
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
-    return this.walletService.listFundingsForAdmin({
+  async listAdminFunding(
+    @Query('page') pageStr?: string,
+    @Query('limit') limitStr?: string,
+    @Query('beneficiaryUserId') beneficiaryUserId?: string,
+  ) {
+    const page = Math.max(parseInt(pageStr ?? '1', 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(limitStr ?? '20', 10) || 20, 1),
+      100,
+    );
+    return this.walletService.listAdminWalletFundings({
       page,
       limit,
-      beneficiaryUserId: query.beneficiaryUserId,
+      beneficiaryUserId: beneficiaryUserId?.trim() || undefined,
     });
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  //  COMPANY: Mes entrées traçables (transparence)
-  // ─────────────────────────────────────────────────────────────────
-
-  @Get('funding/me')
-  @ApiOperation({
-    summary: 'Historique des crédits Arena Coin avec traçabilité',
-    description:
-      'Pour l’utilisateur connecté : liste des opérations où un admin a enregistré un paiement fiat avant mint.',
-  })
-  @ApiResponse({ status: 200 })
-  async listMyFundings(@CurrentUser('id') userId: string) {
-    return this.walletService.listFundingsForBeneficiary(userId);
   }
 
   @Get('admin/mirror-transactions')
   @UseGuards(AdminGuard)
   @ApiOperation({
-    summary: 'Admin: Arena Coin transactions from Hedera Mirror Node',
+    summary: 'Admin: Arena Coin on-chain activity (Hedera Mirror)',
     description:
-      'Reads the public mirror REST API for the treasury account and filters rows ' +
-      'whose token_transfers include ARENA_COIN_TOKEN_ID.',
-  })
-  @ApiQuery({
-    name: 'limit',
-    required: false,
-    description: 'Page size (1–100, default 25)',
-    example: 25,
-  })
-  @ApiQuery({
-    name: 'next',
-    required: false,
-    description:
-      'Pagination: exact `links.next` path from the previous response (must start with /api/v1/transactions)',
-  })
-  @ApiQuery({
-    name: 'cryptotransferOnly',
-    required: false,
-    description:
-      'If true, adds transactiontype=CRYPTOTRANSFER on the mirror request',
-    example: false,
+      'Lists token transfers for ARENA_COIN_TOKEN_ID involving the treasury account (HEDERA_ACCOUNT_ID), with cursor pagination compatible with the mobile admin dashboard.',
   })
   @ApiResponse({ status: 200 })
-  @ApiResponse({
-    status: 429,
-    description: 'Mirror node rate limit — use Retry-After if provided',
-  })
-  async getMirrorArenaTransactions(
+  @ApiResponse({ status: 429, description: 'Hedera Mirror rate limit' })
+  async getAdminMirrorTransactions(
     @Query('limit') limitStr?: string,
-    @Query('next') nextPath?: string,
-    @Query('cryptotransferOnly') cryptotransferOnlyStr?: string,
+    @Query('next') next?: string,
+    @Query('cryptotransferOnly') cryptotransferOnly?: string,
   ) {
-    const limit =
-      limitStr !== undefined && limitStr !== ''
-        ? Number.parseInt(limitStr, 10)
-        : undefined;
-    const cryptotransferOnly =
-      cryptotransferOnlyStr === '1' ||
-      cryptotransferOnlyStr?.toLowerCase() === 'true';
-    return this.walletService.getMirrorArenaTransactionsForAdmin({
-      limit: Number.isFinite(limit) ? limit : undefined,
-      nextPath,
-      cryptotransferOnly,
+    const limit = Math.min(
+      Math.max(parseInt(limitStr ?? '25', 10) || 25, 1),
+      100,
+    );
+    const only =
+      cryptotransferOnly === 'true' ||
+      cryptotransferOnly === '1' ||
+      cryptotransferOnly === 'yes';
+    return this.walletService.getAdminMirrorTransactions({
+      limit,
+      next: next?.trim() || undefined,
+      cryptotransferOnly: only,
     });
   }
 
